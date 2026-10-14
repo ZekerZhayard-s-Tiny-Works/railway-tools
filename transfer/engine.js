@@ -105,18 +105,28 @@ export class TransferEngine {
     this.coords = new Map();
   }
 
-  /** files: Map<文件名, Uint8Array>；缺失的索引文件会抛错 */
+  /** readBytes: async (文件名) => Uint8Array|null；readText 可选，缺省由字节解码 */
   static async load(readBytes, readText = null) {
-    const need = async (name) => {
-      const b = await readBytes(name);
-      if (!b) throw new Error(`缺少数据文件: ${name}`);
-      return b;
+    const text = async (name) => {
+      try {
+        if (readText) return await readText(name);
+        const b = await readBytes(name);
+        return b ? new TextDecoder().decode(b) : null;
+      } catch { return null; }
     };
-    const stationNames = readIndex(await need('s.i'));
-    const trainNames = readIndex(await need('t.i'));
+    // 索引与 20 个车次分片一次并行取回（串行下载会让首屏多等十几秒）
+    const [stationBytes, trainBytes, rulesText, verText, ...shards] = await Promise.all([
+      readBytes('s.i'), readBytes('t.i'), text('t.rule'), text('ver.txt'),
+      ...Array.from({ length: 20 }, (_, i) => readBytes(`T${i}.dat`)),
+    ]);
+    for (const [name, bytes] of [['s.i', stationBytes], ['t.i', trainBytes],
+      ...shards.map((b, i) => [`T${i}.dat`, b])]) {
+      if (!bytes) throw new Error(`缺少数据文件: ${name}`);
+    }
 
-    let rulesText = null;
-    try { rulesText = readText ? await readText('t.rule') : new TextDecoder().decode(await readBytes('t.rule')); } catch { /* 无规则文件即全天开行 */ }
+    const stationNames = readIndex(stationBytes);
+    const trainNames = readIndex(trainBytes);
+
     const rules = [];
     if (rulesText != null) {
       for (const line of rulesText.split(/\r?\n/)) {
@@ -124,9 +134,6 @@ export class TransferEngine {
         if (parts.length >= 2) rules.push({ period: Number(parts[0]), mask: Number(parts[1]) });
       }
     }
-
-    const shards = [];
-    for (let i = 0; i < 20; i++) shards.push(await need(`T${i}.dat`));
 
     const trains = new Array(trainNames.length).fill(null);
     // 第一遍：统计各站乘车边数量
@@ -186,8 +193,7 @@ export class TransferEngine {
       }
     }
 
-    let ver = '';
-    try { ver = new TextDecoder().decode(await need('ver.txt')).replace(/^\uFEFF/, '').trim(); } catch { /* 版本号仅用于展示 */ }
+    const ver = (verText ?? '').replace(/^\uFEFF/, '').trim();
 
     const engine = new TransferEngine(stationNames, trainNames, trains, rules,
       { total, trainId: rideTrain, from: rideFrom, to: rideTo, depOffset: rideDep, arrOffset: rideArr, outStart, outRide, inStart, inRide }, ver);
