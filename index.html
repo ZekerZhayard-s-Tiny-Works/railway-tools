@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>铁路小工具</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="wrap">
+  <h1>铁路小工具</h1>
+  <p class="sub">两个纯前端运行时查询工具：数据在构建时烤进页面，查询全在浏览器本地完成，不需要服务器。</p>
+</header>
+
+<main>
+  <div class="projects">
+    <a class="card" href="metro/">
+      <h3>苏州地铁路由查询</h3>
+      <p>给定出发车站、到达车站与出发（或到达）时刻，求时间最短的乘车方案、经由车站与换乘点。</p>
+      <p class="sub">时间相关 Dijkstra · 9 条线路 / 274 个车站 · 逐站时刻表</p>
+    </a>
+    <a class="card" href="transfer/">
+      <h3>全国铁路中转换乘查询</h3>
+      <p>在全国铁路车次中搜索含换乘的出行方案，支持按出发时间或到达时间查询，并可将邻近车站作为接驳段。</p>
+      <p class="sub">多标签最短路 · 3330 个车站 / 1.3 万个车次 / 76 万条乘车边</p>
+    </a>
+  </div>
+
+  <h2>说明</h2>
+  <div class="card">
+    <p>两个工具分别由两个 Java 程序移植而来，算法与数据格式保持一致，结果与命令行版逐字对拍验证通过。</p>
+    <p class="sub">数据均为第三方来源：苏州地铁时刻表来自时刻表网站，全国铁路时刻表来自路路通数据包。时刻表会过期，站点数据是构建时的快照，详见各页面底部与仓库 README。结果仅供参考，实际请以车站公告为准。</p>
+  </div>
+</main>
+
+<footer class="wrap">
+  <p>纯静态站点（GitHub Pages），无后端、无第三方脚本、无跟踪。</p>
+</footer>
+</body>
+</html>

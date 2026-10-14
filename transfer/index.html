@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>全国铁路中转换乘查询</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<header class="wrap">
+  <h1>全国铁路中转换乘查询</h1>
+  <p class="sub">基于路路通时刻表数据，给定出发站、到达站与时刻，在全部车次中搜索换乘次数最少、时间最优的方案，并可用车站坐标把邻近车站作为接驳段。<a href="../">← 返回首页</a></p>
+</header>
+
+<main>
+  <form class="card" id="form">
+    <div class="grid">
+      <label class="field">出发站
+        <div class="suggest"><input id="from" type="text" autocomplete="off" placeholder="如 北京" required><ul hidden></ul></div>
+      </label>
+      <label class="field">到达站
+        <div class="suggest"><input id="to" type="text" autocomplete="off" placeholder="如 阿克陶" required><ul hidden></ul></div>
+      </label>
+      <label class="field">日期
+        <input id="date" type="date" required>
+      </label>
+      <label class="field">时间
+        <input id="time" type="time" required>
+      </label>
+      <label class="field">查询方式
+        <div class="seg">
+          <label><input type="radio" name="mode" value="depart" checked><span>出发时间</span></label>
+          <label><input type="radio" name="mode" value="arrive"><span>到达时间</span></label>
+        </div>
+      </label>
+      <label class="field">换乘预留（分钟）
+        <input id="minTransfer" type="number" value="15" min="0" max="1440" step="1">
+      </label>
+      <label class="field">接驳速度（km/h）
+        <input id="speed" type="number" value="20" min="0.5" max="200" step="0.5">
+      </label>
+      <label class="field">接驳最大距离（km）
+        <input id="maxDist" type="number" value="30" min="0.5" max="500" step="0.5">
+      </label>
+      <label class="field wide"><span class="check"><input id="walk" type="checkbox" checked>启用邻站接驳（用车站坐标把附近车站连成步行段，如 北京 → 北京南）</span></label>
+    </div>
+    <div class="actions">
+      <button type="submit" id="go" disabled>搜索</button>
+      <span class="status" id="status">正在加载时刻表数据…</span>
+    </div>
+  </form>
+
+  <section class="card soft" id="result" hidden>
+    <div class="summary" id="summary"></div>
+    <div class="scroll"><table class="data" id="table"></table></div>
+    <details id="details">
+      <summary>文本输出（与命令行版一致）</summary>
+      <pre class="text" id="textOut"></pre>
+    </details>
+  </section>
+
+  <section class="card" id="logCard" hidden>
+    <div class="log" id="log"></div>
+  </section>
+</main>
+
+<footer class="wrap">
+  <p id="dataNote"></p>
+  <p>数据来自路路通时刻表（第三方数据，仅供参考，实际请以车站公告为准）；换乘预留与接驳耗时为估计参数。</p>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>苏州地铁路由查询</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<header class="wrap">
+  <h1>苏州地铁路由查询</h1>
+  <p class="sub">给定出发车站与出发（或到达）时刻，按时间相关 Dijkstra 求时间最短的乘车方案与换乘点。<a href="../">← 返回首页</a></p>
+</header>
+
+<main>
+  <form class="card" id="form">
+    <div class="grid">
+      <label class="field">出发站
+        <div class="suggest"><input id="from" type="text" autocomplete="off" placeholder="如 木渎" required><ul hidden></ul></div>
+      </label>
+      <label class="field">到达站
+        <div class="suggest"><input id="to" type="text" autocomplete="off" placeholder="如 桑田岛" required><ul hidden></ul></div>
+      </label>
+      <label class="field">星期
+        <select id="weekday">
+          <option value="1">周一</option><option value="2">周二</option><option value="3">周三</option>
+          <option value="4">周四</option><option value="5">周五</option><option value="6">周六</option>
+          <option value="7">周日</option>
+        </select>
+      </label>
+      <label class="field">查询方式
+        <div class="seg">
+          <label><input type="radio" name="mode" value="depart" checked><span>出发时间</span></label>
+          <label><input type="radio" name="mode" value="arrive"><span>到达时间</span></label>
+        </div>
+      </label>
+      <label class="field"><span id="timeLabel">出发时刻</span>
+        <input id="time" type="time" value="08:30" required>
+      </label>
+      <label class="field">站间运行（分钟）
+        <input id="runMin" type="number" value="2" min="0.5" max="30" step="0.5">
+      </label>
+      <label class="field">换乘耗时（分钟）
+        <input id="transferMin" type="number" value="5" min="0" max="60" step="1">
+      </label>
+    </div>
+    <div class="actions">
+      <button type="submit" id="go">查询</button>
+      <span class="status" id="status"></span>
+    </div>
+  </form>
+
+  <section class="card soft" id="result" hidden>
+    <div class="summary" id="summary"></div>
+    <div id="timeline"></div>
+    <details id="details">
+      <summary>文本输出（与命令行版一致）</summary>
+      <pre class="text" id="textOut"></pre>
+    </details>
+  </section>
+</main>
+
+<footer class="wrap">
+  <p id="dataNote">数据加载中…</p>
+  <p>站间运行与换乘耗时为估计参数；多条可行经由时按 时间 → 换乘候车余量合计最长 → 换乘次数最少 取舍，结果仅供参考。</p>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
