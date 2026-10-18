@@ -68,11 +68,11 @@ const crawlTimes = [...ttFiles, 'stations.txt', 'official_pairs.txt'].map((f) =>
 const snapshot = new Date(Math.max(...crawlTimes)).toISOString().slice(0, 10);
 writeFileSync(join(outDir, 'network.json'), JSON.stringify({ snapshot, corridors, stations, labels, officialLines, officialPairs }));
 
-let stopTotal = 0;
 for (const [weekday, data] of [...byWeekday].sort((a, b) => a[0] - b[0])) {
-  stopTotal += Object.keys(data.tables).length;
+  const stops = Object.keys(data.tables);
+  const departures = stops.reduce((s, k) => s + data.tables[k][0].length + data.tables[k][1].length, 0);
   const out = join(outDir, `tt_w${weekday}.json`);
   writeFileSync(out, JSON.stringify(data));
-  console.log(`tt_w${weekday}.json  ${Object.keys(data.tables).length} 站次  ${(readFileSync(out).length / 1024).toFixed(0)} KB`);
+  console.log(`tt_w${weekday}.json  ${stops.length} 站次 / ${departures} 班次  ${(readFileSync(out).length / 1024).toFixed(0)} KB`);
 }
 console.log(`network.json  ${corridors.length} 走廊 / ${stations.length} 站 / ${officialPairs.length} 官网站对  ${(readFileSync(join(outDir, 'network.json')).length / 1024).toFixed(0)} KB`);
