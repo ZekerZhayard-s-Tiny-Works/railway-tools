@@ -5,6 +5,10 @@ on:
   schedule:
     - cron: '0 0 * * 1'
   workflow_dispatch:
+  # 修改本文件时自动试跑一次，便于验证工作流改动
+  push:
+    paths:
+      - '.github/workflows/update-metro.yml'
 
 permissions:
   contents: write
@@ -29,6 +33,11 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+
+      - name: 检查数据源连通性
+        run: |
+          curl -sS -o /dev/null -w "时刻表站点: HTTP %{http_code}，耗时 %{time_total}s\n" --max-time 60 http://106.14.198.252:8512/station
+          curl -sS -o /dev/null -w "官网线路图: HTTP %{http_code}，耗时 %{time_total}s\n" --max-time 60 https://www.sz-mtr.com/service/guide/map/index_zh.html
 
       - name: 编译抓取程序
         run: javac -encoding UTF-8 -d timetable/temp/classes timetable/src/szmetro/*.java
