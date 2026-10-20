@@ -1,12 +1,27 @@
 // 把 timetable 项目的抓取缓存 (temp/cache) 转换成站点用的 JSON。
-// 用法: node tools/build-metro-data.mjs [cacheDir] [outDir]
-import { readFileSync, writeFileSync, readdirSync, mkdirSync, statSync } from 'node:fs';
+// 用法: node tools/build-metro-data.mjs [cacheDir] [outDir] [--min-stops N] [--min-departures N]
+// 给了阈值时，任一星期站次或总班次低于阈值即以非零退出（供定时任务判定抓取异常）。
+import { existsSync, readFileSync, writeFileSync, readdirSync, mkdirSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const cacheDir = process.argv[2] ?? join(here, '..', '..', 'timetable', 'temp', 'cache');
-const outDir = process.argv[3] ?? join(here, '..', 'metro', 'data');
+const siteRoot = join(here, '..');
+const positional = [];
+const flags = new Map();
+const argv = process.argv.slice(2);
+for (let i = 0; i < argv.length; i++) {
+  if (argv[i].startsWith('--')) flags.set(argv[i], argv[++i]);
+  else positional.push(argv[i]);
+}
+const flag = (name) => flags.get(name);
+// 抓取缓存优先用仓库内的 timetable/（CI 场景），其次用同级的 ../timetable/（本地开发场景）
+const cacheDir = positional[0] ?? (existsSync(join(siteRoot, 'timetable', 'temp', 'cache'))
+  ? join(siteRoot, 'timetable', 'temp', 'cache')
+  : join(siteRoot, '..', 'timetable', 'temp', 'cache'));
+const outDir = positional[1] ?? join(siteRoot, 'metro', 'data');
+const minStops = Number(flag('--min-stops') ?? 0);
+const minDepartures = Number(flag('--min-departures') ?? 0);
 
 const lines = (f) => readFileSync(join(cacheDir, f), 'utf8').split(/\r?\n/).filter((l) => l.trim() !== '');
 
@@ -62,17 +77,32 @@ for (const f of ttFiles) {
   byWeekday.get(weekday).tables[`${cid}|${idx}`] = dirs;
 }
 
-mkdirSync(outDir, { recursive: true });
-// 数据快照时间取缓存文件里最新的一次抓取
+// 数据快照时间取缓存文件里最新的一次抓取（按本地时区取日期，CI 里 TZ 设为 Asia/Shanghai）
 const crawlTimes = [...ttFiles, 'stations.txt', 'official_pairs.txt'].map((f) => statSync(join(cacheDir, f)).mtimeMs);
-const snapshot = new Date(Math.max(...crawlTimes)).toISOString().slice(0, 10);
-writeFileSync(join(outDir, 'network.json'), JSON.stringify({ snapshot, corridors, stations, labels, officialLines, officialPairs }));
+const newest = new Date(Math.max(...crawlTimes));
+const snapshot = `${newest.getFullYear()}-${String(newest.getMonth() + 1).padStart(2, '0')}-${String(newest.getDate()).padStart(2, '0')}`;
 
-for (const [weekday, data] of [...byWeekday].sort((a, b) => a[0] - b[0])) {
+const weeks = [...byWeekday].sort((a, b) => a[0] - b[0]).map(([weekday, data]) => {
   const stops = Object.keys(data.tables);
-  const departures = stops.reduce((s, k) => s + data.tables[k][0].length + data.tables[k][1].length, 0);
-  const out = join(outDir, `tt_w${weekday}.json`);
-  writeFileSync(out, JSON.stringify(data));
-  console.log(`tt_w${weekday}.json  ${stops.length} 站次 / ${departures} 班次  ${(readFileSync(out).length / 1024).toFixed(0)} KB`);
+  return { weekday, data, stops: stops.length, departures: stops.reduce((s, k) => s + data.tables[k][0].length + data.tables[k][1].length, 0) };
+});
+
+const problems = [];
+for (const w of weeks) {
+  if (w.stops < minStops) problems.push(`tt_w${w.weekday}: ${w.stops} 站次 < 下限 ${minStops}`);
+  if (w.departures < minDepartures) problems.push(`tt_w${w.weekday}: ${w.departures} 班次 < 下限 ${minDepartures}`);
 }
-console.log(`network.json  ${corridors.length} 走廊 / ${stations.length} 站 / ${officialPairs.length} 官网站对  ${(readFileSync(join(outDir, 'network.json')).length / 1024).toFixed(0)} KB`);
+if (weeks.length !== 7) problems.push(`只生成了 ${weeks.length} 个星期（应为 7）`);
+if (problems.length) {
+  console.error(`抓取数据不完整，未写入任何文件:\n  ${problems.join('\n  ')}`);
+  process.exit(1);
+}
+
+mkdirSync(outDir, { recursive: true });
+for (const w of weeks) {
+  const out = join(outDir, `tt_w${w.weekday}.json`);
+  writeFileSync(out, JSON.stringify(w.data));
+  console.log(`tt_w${w.weekday}.json  ${w.stops} 站次 / ${w.departures} 班次  ${(readFileSync(out).length / 1024).toFixed(0)} KB`);
+}
+writeFileSync(join(outDir, 'network.json'), JSON.stringify({ snapshot, corridors, stations, labels, officialLines, officialPairs }));
+console.log(`network.json  ${corridors.length} 走廊 / ${stations.length} 站 / ${officialPairs.length} 官网站对  ${(readFileSync(join(outDir, 'network.json')).length / 1024).toFixed(0)} KB  快照 ${snapshot}`);

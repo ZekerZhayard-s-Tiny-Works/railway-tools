@@ -1,15 +1,18 @@
 // 对拍：JS 引擎输出 vs timetable 的 Java CLI 输出，逐字符比较。
 // 用法: node tools/verify-metro.mjs
+// Java 源码优先用仓库内的 timetable/（CI 场景），其次用同级的 ../timetable/（本地开发场景）。
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Network, Router } from '../metro/engine.js';
 import { renderText } from '../metro/render.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const root = join(here, '..', '..');
-const javaDir = join(root, 'timetable');
+const siteRoot = join(here, '..');
+const javaDir = existsSync(join(siteRoot, 'timetable'))
+  ? join(siteRoot, 'timetable')
+  : join(siteRoot, '..', 'timetable');
 const dataDir = join(here, '..', 'metro', 'data');
 const raw = JSON.parse(readFileSync(join(dataDir, 'network.json'), 'utf8'));
 const tablesByWeekday = new Map();
