@@ -36,14 +36,21 @@ tools/
 
 **苏州地铁**（源站 `http://106.14.198.252:8512`）：由 `.github/workflows/update-metro.yml` 每周自动执行，无需本机参与。仓库内的 `timetable/` 是抓取程序源码，工作流会依次：
 
-1. 编译并抓取 7 个星期的时刻表与官网站对时间（约 20~40 分钟，取决于 runner 到源站的网络）；
+1. 把 `timetable/official/` 里的官网站对时间快照预置到缓存，再抓取 7 个星期的时刻表（约 20~50 分钟，取决于 runner 到源站的网络）；
 2. `node tools/build-metro-data.mjs --min-stops 264 --min-departures 80000` 重建 `metro/data`，站次或班次低于阈值即判为抓取异常、不写文件；
 3. `node tools/verify-metro.mjs` 与 Java 版对拍，必须 20 通过 0 失败；
 4. 有变化才提交 `metro/data`，最后把站点作为 Pages 工件部署。
 
 定时为 UTC `0 0 * * 1`，即北京时间每周一 08:00；也可在 Actions 页面手动 `Run workflow` 触发。GitHub 的定时任务可能延迟数分钟到数十分钟。
 
-本地手动执行同样的流程：
+**关于官网站对时间**：站间运行时长来自苏州地铁官网，该站对境外 IP 返回 403，GitHub runner 无法抓取，因此时刻表每周实时更新、站对时间使用仓库内快照 `timetable/official/`（随线路调整才需要变）。要更新快照，在本机执行：
+
+```bash
+cd timetable && ./build.sh && ./run.sh crawl --all-weekdays --refresh
+cp temp/cache/official_lines.txt temp/cache/official_pairs.txt official/
+```
+
+本地手动执行同样的更新流程：
 
 ```bash
 cd timetable && ./build.sh && ./run.sh crawl --all-weekdays --refresh
