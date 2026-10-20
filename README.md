@@ -80,7 +80,12 @@ node tools/verify-transfer.mjs      # 需要 LulutongTransfer 的 jar 与已更�
 
 ## 部署
 
-GitHub Pages，源为 **GitHub Actions**：`update-metro.yml` 抓取完成后把站点打包成工件并部署；平时的代码改动推送到 `main` 后，可在 Actions 里手动运行该工作流来发布。`.nojekyll` 已就位，站点不需要额外构建。
+GitHub Pages，源为 **GitHub Actions**：
+
+- `.github/workflows/update-metro.yml`：每周抓取后打包并部署（也含数据提交）；
+- `.github/workflows/deploy.yml`：代码或页面改动推送到 `main` 后自动部署（定时任务用机器人令牌提交的数据变更不会触发它，由上一个工作流自行部署）。
+
+站点内容为仓库根目录（排除 `.git`、`.github`、`timetable`），`.nojekyll` 已就位，不需要额外构建。
 
 ## 数据版权与免责
 
