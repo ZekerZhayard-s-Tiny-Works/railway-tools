@@ -10,9 +10,10 @@ import { renderText } from '../metro/render.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const siteRoot = join(here, '..');
-const javaDir = existsSync(join(siteRoot, 'timetable'))
-  ? join(siteRoot, 'timetable')
-  : join(siteRoot, '..', 'timetable');
+// 选已编译好 temp/classes 的那份 Java 源码：CI 用仓库内的 timetable/，本地开发用同级的 ../timetable/
+const javaCandidates = [join(siteRoot, 'timetable'), join(siteRoot, '..', 'timetable')];
+const javaDir = javaCandidates.find((d) => existsSync(join(d, 'temp', 'classes', 'szmetro', 'Main.class')))
+  ?? javaCandidates[0];
 const dataDir = join(here, '..', 'metro', 'data');
 const raw = JSON.parse(readFileSync(join(dataDir, 'network.json'), 'utf8'));
 const tablesByWeekday = new Map();
