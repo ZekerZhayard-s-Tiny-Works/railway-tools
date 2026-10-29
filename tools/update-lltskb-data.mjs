@@ -1,7 +1,9 @@
 // 从路路通数据源更新站点用的时刻表数据（只取引擎需要的文件，纯 Node 解压）。
 // 用法: node tools/update-lltskb-data.mjs [outDir]
-import { writeFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+// 数据包先解压到临时目录，校验通过后才替换 outDir 里的文件；任何一步失败都不会改动已有数据。
+import { writeFileSync, mkdirSync, readFileSync, rmSync, renameSync, mkdtempSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { inflateRawSync } from 'node:zlib';
 
@@ -9,7 +11,8 @@ const VERSION_URL = 'http://down.lltskb.com/android.ver';
 const NEEDED = ['s.i', 't.i', 't.rule', 'ver.txt', ...Array.from({ length: 20 }, (_, i) => `T${i}.dat`)];
 
 const here = dirname(fileURLToPath(import.meta.url));
-const outDir = process.argv[2] ?? join(here, '..', 'transfer', 'data');
+const positional = process.argv.slice(2).filter((a) => !a.startsWith('--'));
+const outDir = positional[0] ?? join(here, '..', 'transfer', 'data');
 
 const verText = await (await fetch(VERSION_URL)).text();
 const dataVersion = /"version"\s*:\s*\{.*?"data"\s*:\s*"(\d+)"/s.exec(verText)?.[1];
@@ -41,8 +44,10 @@ if (zip === null) throw new Error(`数据下载失败: ${lastErr?.message}`);
 
 // 最小 ZIP 读取：遍历中央目录，取出需要的条目（stored / deflate）
 const entries = new Map();
+let sawDirectory = false;
 for (let i = zip.length - 22; i >= 0; i--) {
   if (zip.readUInt32LE(i) !== 0x06054b50) continue;
+  sawDirectory = true;
   let p = zip.readUInt32LE(i + 16);
   const count = zip.readUInt16LE(i + 10);
   for (let n = 0; n < count; n++) {
@@ -58,17 +63,28 @@ for (let i = zip.length - 22; i >= 0; i--) {
   }
   break;
 }
+if (!sawDirectory) throw new Error('下载内容不是 zip（未找到中央目录）');
 
-mkdirSync(outDir, { recursive: true });
-const written = [];
-for (const want of NEEDED) {
-  const key = want.toLowerCase();
-  const data = entries.get(key) ?? entries.get(key.replace('.', '_'));   // 数据包里索引也可能叫 s_i / t_i
-  if (!data) { console.log(`跳过（数据包中没有）: ${want}`); continue; }
-  writeFileSync(join(outDir, want), data);
-  written.push(want);
+// 先写入临时目录，确认核心文件齐全再替换，避免中途失败留下半套数据
+const staging = mkdtempSync(join(tmpdir(), 'lltskb-'));
+try {
+  const written = [];
+  for (const want of NEEDED) {
+    const key = want.toLowerCase();
+    const data = entries.get(key) ?? entries.get(key.replace('.', '_'));   // 数据包里索引也可能叫 s_i / t_i
+    if (!data) { console.log(`跳过（数据包中没有）: ${want}`); continue; }
+    writeFileSync(join(staging, want), data);
+    written.push(want);
+  }
+  for (const core of ['s.i', 't.i', 'T0.dat']) {
+    if (!written.includes(core)) throw new Error(`数据包缺少核心文件: ${core}`);
+  }
+  if (readFileSync(join(staging, 'ver.txt'), 'utf8').replace(/^\uFEFF/, '').trim() !== dataVersion) {
+    throw new Error('数据包内的 ver.txt 与远端版本号不一致');
+  }
+  mkdirSync(outDir, { recursive: true });
+  for (const name of written) renameSync(join(staging, name), join(outDir, name));
+  console.log(`已更新 ${written.length} 个文件到 ${outDir}: ${written.join(' ')}`);
+} finally {
+  rmSync(staging, { recursive: true, force: true });
 }
-for (const core of ['s.i', 't.i', 'T0.dat']) {
-  if (!written.includes(core)) throw new Error(`解压结果缺少核心文件: ${core}`);
-}
-console.log(`已更新 ${written.length} 个文件到 ${outDir}: ${written.join(' ')}`);
