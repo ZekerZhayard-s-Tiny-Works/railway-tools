@@ -125,10 +125,15 @@ async function run() {
 
 $('form').addEventListener('submit', (e) => { e.preventDefault(); run(); });
 
-const today = new Date();
+// 每次打开/刷新都用当前时刻，避免浏览器恢复上次输入导致时间过期
 const pad = (n) => String(n).padStart(2, '0');
-$('date').value = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
-$('time').value = `${pad(today.getHours())}:${pad(today.getMinutes())}`;
+const resetNow = () => {
+  const now = new Date();
+  $('date').value = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  $('time').value = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+};
+resetNow();
+window.addEventListener('pageshow', resetNow);
 $('dataNote').textContent = '数据来源: down.lltskb.com 时刻表数据包';
 
 loadEngine().catch((e) => {

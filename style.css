@@ -103,6 +103,16 @@ button.ghost { color: var(--fg); background: var(--bg); border-color: var(--line
 .stops .t { color: var(--muted); font-variant-numeric: tabular-nums; margin-left: 4px; }
 .xfer { margin: 8px 0 0; padding: 7px 10px; background: var(--bg-soft); border-left: 3px solid var(--accent); border-radius: 0 7px 7px 0; font-size: 14px; }
 
+.plan-title {
+  margin: 18px 0 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.plan-title:first-child { margin-top: 4px; }
+
 table.data { width: 100%; border-collapse: collapse; font-size: 14px; }
 table.data th, table.data td { padding: 7px 8px; border-bottom: 1px solid var(--line-soft); text-align: left; white-space: nowrap; }
 table.data th { color: var(--muted); font-weight: 600; font-size: 13px; }

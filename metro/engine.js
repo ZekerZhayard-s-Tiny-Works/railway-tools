@@ -216,10 +216,12 @@ function cmpCost(a, b) {
   return a.count - b.count;
 }
 
+/** 状态键：车站 << 7 | (走廊+2) | 是否刚换乘到站台（与 Java 版 Router.key 一致） */
 const key = (gid, corridor, afterTransfer) => gid * 128 + (corridor + 2) + (afterTransfer ? 64 : 0);
-const keyGid = (k) => Math.floor(k / 128);
-const keyCorridor = (k) => (k & 63) - 2;
-const keyAfterTransfer = (k) => (k & 64) !== 0;
+const decodeKey = (k) => {
+  const low = k & 127;
+  return { gid: Math.floor(k / 128), corridor: (low & 63) - 2, afterTransfer: (low & 64) !== 0 };
+};
 
 /** 最小堆（同 Java PriorityQueue + Cost 比较器） */
 class Heap {
@@ -273,62 +275,206 @@ export class Router {
     this.transferSec = transferSec;
   }
 
-  /** 给定最早出发时刻，返回按字典序最优的方案；不可达返回 null */
+  /** 给定最早出发时刻，返回最优方案；不可达返回 null（与 Java 版逐字一致） */
   routeDepart(fromGid, toGid, startSec) {
     const net = this.net;
     if (fromGid === toGid) return { startSec, boardSec: startSec, arriveSec: startSec, rows: [] };
 
-    const best = new Map(), parent = new Map();
-    const pq = new Heap((x, y) => cmpCost(x.cost, y.cost));
+    const bestCost = new Map(), parent = new Map();
+    const pq = new Heap((a, b) => cmpCost(a.cost, b.cost));
+    const startKey = key(fromGid, START, false);
     const startCost = { time: startSec, gap: 0, count: 0 };
-    best.set(key(fromGid, START, false), startCost);
-    pq.push({ cost: startCost, key: key(fromGid, START, false) });
+    bestCost.set(startKey, startCost);
+    pq.push({ cost: startCost, key: startKey });
 
     while (pq.size > 0) {
       const cur = pq.pop();
-      if (best.get(cur.key) !== cur.cost) continue;
+      if (bestCost.get(cur.key) !== cur.cost) continue;
       const c = cur.cost, k = cur.key;
-      const gid = keyGid(k);
-      const corridor = keyCorridor(k);
-      const afterTransfer = keyAfterTransfer(k);
+      const { gid, corridor, afterTransfer } = decodeKey(k);
 
       if (corridor === START) {
         for (const l of net.corridorsAtStation.get(gid) ?? []) {
-          this.relax(best, parent, pq, key(gid, l, false), { time: c.time, gap: c.gap, count: c.count },
-            { type: TYPE_START, fromKey: k, fromGid: gid, fromCorridor: START, corridorId: l, dir: -1, toGid: gid, departSec: c.time, arriveSec: c.time });
+          this.relaxEdge(bestCost, parent, pq, key(gid, l, false), { time: c.time, gap: c.gap, count: c.count },
+            { type: TYPE_START, fromGid: gid, fromCorridor: START, corridorId: l, dir: -1, toGid: gid, departSec: c.time, arriveSec: c.time }, k);
         }
-      } else {
-        const idx = net.stopIndex(corridor, gid);
-        const stops = net.corridors.get(corridor).stopGids;
-        for (let dir = 0; dir <= 1; dir++) {
-          const dep = nextDeparture(net.table(corridor, idx, dir), c.time);
-          if (dep < 0) continue;
-          const gapAdd = afterTransfer ? dep - c.time : 0;
-          const step = net.stepOf(corridor, dir);
-          for (let nidx = idx + step; nidx >= 0 && nidx < stops.length; nidx += step) {
-            const arrive = dep + net.elapsedSec(corridor, idx, nidx, this.runSec);
-            this.relax(best, parent, pq, key(stops[nidx], corridor, false), { time: arrive, gap: c.gap + gapAdd, count: c.count },
-              { type: TYPE_RIDE, fromKey: k, fromGid: gid, fromCorridor: corridor, corridorId: corridor, dir, toGid: stops[nidx], departSec: dep, arriveSec: arrive });
-          }
+        continue;
+      }
+      const idx = net.stopIndex(corridor, gid);
+      const stops = net.corridors.get(corridor).stopGids;
+      for (let dir = 0; dir <= 1; dir++) {
+        const dep = nextDeparture(net.table(corridor, idx, dir), c.time);
+        if (dep < 0) continue;
+        const gapAdd = afterTransfer ? dep - c.time : 0;
+        const step = net.stepOf(corridor, dir);
+        for (let nidx = idx + step; nidx >= 0 && nidx < stops.length; nidx += step) {
+          const arrive = dep + net.elapsedSec(corridor, idx, nidx, this.runSec);
+          this.relaxEdge(bestCost, parent, pq, key(stops[nidx], corridor, false), { time: arrive, gap: c.gap + gapAdd, count: c.count },
+            { type: TYPE_RIDE, fromGid: gid, fromCorridor: corridor, corridorId: corridor, dir, toGid: stops[nidx], departSec: dep, arriveSec: arrive }, k);
         }
-        for (const m of net.corridorsAtStation.get(gid) ?? []) {
-          if (m === corridor) continue;
-          this.relax(best, parent, pq, key(gid, m, true), { time: c.time + this.transferSec, gap: c.gap, count: c.count + 1 },
-            { type: TYPE_TRANSFER, fromKey: k, fromGid: gid, fromCorridor: corridor, corridorId: m, dir: -1, toGid: gid, departSec: c.time, arriveSec: c.time + this.transferSec });
-        }
+      }
+      for (const m of net.corridorsAtStation.get(gid) ?? []) {
+        if (m === corridor) continue;
+        this.relaxEdge(bestCost, parent, pq, key(gid, m, true), { time: c.time + this.transferSec, gap: c.gap, count: c.count + 1 },
+          { type: TYPE_TRANSFER, fromGid: gid, fromCorridor: corridor, corridorId: m, dir: -1, toGid: gid, departSec: c.time, arriveSec: c.time + this.transferSec }, k);
       }
     }
 
-    let bestKey = -1, bestCost = null;
-    for (const [kk, cc] of best) {
-      if (keyGid(kk) !== toGid) continue;
-      if (bestCost === null || cmpCost(cc, bestCost) < 0) { bestCost = cc; bestKey = kk; }
+    let bestKey = -1, bestC = null;
+    for (const [kk, cc] of bestCost) {
+      if (decodeKey(kk).gid !== toGid) continue;
+      if (bestC === null || cmpCost(cc, bestC) < 0) { bestC = cc; bestKey = kk; }
     }
     if (bestKey < 0) return null;
-    return this.buildPlan(parent, bestKey, startSec, bestCost.time);
+
+    const chain = [];
+    for (let k = bestKey; ;) {
+      const e = parent.get(k);
+      if (e === undefined) break;
+      chain.push(e);
+      if (e.type === TYPE_START) break;
+      k = e.from;
+    }
+    chain.reverse();
+    return this.buildPlan(chain, startSec, bestC.time);
   }
 
-  /** 给定到达时限，返回"最晚出发仍不迟到"的方案；无法按时到达返回 null */
+  relaxEdge(best, parent, pq, k, cost, edge, fromKey) {
+    const old = best.get(k);
+    if (old !== undefined && cmpCost(old, cost) <= 0) return;
+    best.set(k, cost);
+    parent.set(k, { ...edge, from: fromKey });
+    pq.push({ cost, key: k });
+  }
+
+  /**
+   * 给定最早出发时刻，返回全部并列最快（到达时刻同为最早）的方案。
+   * 状态与 Java 版 Router 完全一致：车站 × 所在走廊 × 是否刚换乘到站台。
+   * 阶段一按 (时间, 换乘候车余量, 换乘次数) 字典序求各状态最优代价；
+   * 阶段二只在「沿紧边前进不推迟到达」的子图上枚举全部最短路径，
+   * 因此换乘点不同、或换乘次数不同但到达时刻相同的方案都会列出。
+   */
+  routeDepartAll(fromGid, toGid, startSec) {
+    const net = this.net;
+    if (fromGid === toGid) return [{ startSec, boardSec: startSec, arriveSec: startSec, rows: [] }];
+
+    const startKey = key(fromGid, START, false);
+    const bestCost = new Map([[startKey, { time: startSec, gap: 0, count: 0 }]]);
+    const pq = new Heap((a, b) => cmpCost(a.cost, b.cost));
+    pq.push({ cost: bestCost.get(startKey), key: startKey });
+
+    while (pq.size > 0) {
+      const cur = pq.pop();
+      if (bestCost.get(cur.key) !== cur.cost) continue;
+      const { gid, corridor, afterTransfer } = decodeKey(cur.key);
+      const c = cur.cost;
+      const idx = corridor === START ? -1 : net.stopIndex(corridor, gid);
+
+      if (corridor === START) {
+        for (const l of net.corridorsAtStation.get(gid) ?? []) {
+          this.relaxCost(bestCost, pq, key(gid, l, false), { time: c.time, gap: c.gap, count: c.count });
+        }
+        continue;
+      }
+      const stops = net.corridors.get(corridor).stopGids;
+      for (let dir = 0; dir <= 1; dir++) {
+        const dep = nextDeparture(net.table(corridor, idx, dir), c.time);
+        if (dep < 0) continue;
+        const gapAdd = afterTransfer ? dep - c.time : 0;
+        const step = net.stepOf(corridor, dir);
+        for (let nidx = idx + step; nidx >= 0 && nidx < stops.length; nidx += step) {
+          this.relaxCost(bestCost, pq, key(stops[nidx], corridor, false), {
+            time: dep + net.elapsedSec(corridor, idx, nidx, this.runSec), gap: c.gap + gapAdd, count: c.count,
+          });
+        }
+      }
+      for (const m of net.corridorsAtStation.get(gid) ?? []) {
+        if (m === corridor) continue;
+        this.relaxCost(bestCost, pq, key(gid, m, true), { time: c.time + this.transferSec, gap: c.gap, count: c.count + 1 });
+      }
+    }
+
+    let minArrive = Infinity;
+    for (const [k, c] of bestCost) if (decodeKey(k).gid === toGid && c.time < minArrive) minArrive = c.time;
+    if (minArrive === Infinity) return [];
+
+    const out = [];
+    this.enumerate(fromGid, toGid, startSec, minArrive, bestCost, out);
+    out.sort((a, b) => cmpCost(a.cost, b.cost));
+    return dedupePlans(out.map((x) => this.buildPlan(x.path, startSec, minArrive, true)));
+  }
+
+  relaxCost(best, pq, k, cost) {
+    const old = best.get(k);
+    if (old !== undefined && cmpCost(old, cost) <= 0) return;
+    best.set(k, cost);
+    pq.push({ cost, key: k });
+  }
+
+  /**
+   * DFS 枚举：只在「沿紧边走到下一状态仍等于其最优代价」时前进。
+   * 同一线路同一方向上「下车后立刻又上同一班车」与「一次坐到底」等价，
+   * 这类拆分会让枚举量爆炸并产生重复方案，因此在续乘时不重复上同一班车。
+   */
+  enumerate(fromGid, toGid, startSec, minArrive, bestCost, out) {
+    const net = this.net;
+    const seen = new Set();
+    const eq = (k, cost) => {
+      const b = bestCost.get(k);
+      return b !== undefined && cmpCost(b, cost) === 0;
+    };
+
+    const walk = (gid, corridor, afterTransfer, cost, path) => {
+      if (gid === toGid && cost.time === minArrive) {
+        out.push({ path: [...path], cost: { ...cost } });
+        return;
+      }
+      if (cost.time > minArrive) return;
+      // 同一 (状态, 代价, 步数) 只展开一次：折返列车会形成零耗时环
+      const sig = `${gid}/${corridor}/${afterTransfer}/${cost.time}/${cost.gap}/${cost.count}/${path.length}`;
+      if (seen.has(sig)) return;
+      seen.add(sig);
+
+      if (corridor === START) {
+        for (const l of net.corridorsAtStation.get(gid) ?? []) {
+          const nc = { time: cost.time, gap: cost.gap, count: cost.count };
+          if (!eq(key(gid, l, false), nc)) continue;
+          path.push({ type: TYPE_START, fromGid: gid, corridorId: l, dir: -1, toGid: gid, departSec: cost.time, arriveSec: cost.time });
+          walk(gid, l, false, nc, path);
+          path.pop();
+        }
+        return;
+      }
+
+      const idx = net.stopIndex(corridor, gid);
+      const stops = net.corridors.get(corridor).stopGids;
+      for (let dir = 0; dir <= 1; dir++) {
+        const dep = nextDeparture(net.table(corridor, idx, dir), cost.time);
+        if (dep < 0) continue;
+        const gapAdd = afterTransfer ? dep - cost.time : 0;
+        const step = net.stepOf(corridor, dir);
+        for (let nidx = idx + step; nidx >= 0 && nidx < stops.length; nidx += step) {
+          const arrive = dep + net.elapsedSec(corridor, idx, nidx, this.runSec);
+          const nc = { time: arrive, gap: cost.gap + gapAdd, count: cost.count };
+          if (!eq(key(stops[nidx], corridor, false), nc)) continue;
+          path.push({ type: TYPE_RIDE, fromGid: gid, corridorId: corridor, dir, toGid: stops[nidx], departSec: dep, arriveSec: arrive });
+          walk(stops[nidx], corridor, false, nc, path);
+          path.pop();
+        }
+      }      for (const m of net.corridorsAtStation.get(gid) ?? []) {
+        if (m === corridor) continue;
+        const nc = { time: cost.time + this.transferSec, gap: cost.gap, count: cost.count + 1 };
+        if (!eq(key(gid, m, true), nc)) continue;
+        path.push({ type: TYPE_TRANSFER, fromGid: gid, corridorId: m, dir: -1, toGid: gid, departSec: cost.time, arriveSec: nc.time });
+        walk(gid, m, true, nc, path);
+        path.pop();
+      }
+    };
+
+    walk(fromGid, START, false, { time: startSec, gap: 0, count: 0 }, []);
+  }
+
+  /** 给定到达时限，返回"最晚出发仍不迟到"的方案；无法按时到达返回 null（与 Java 版一致） */
   routeArrive(fromGid, toGid, deadlineSec) {
     const net = this.net;
     const cands = new Set();
@@ -352,26 +498,39 @@ export class Router {
     return bestPlan;
   }
 
-  relax(best, parent, pq, nKey, nc, e) {
-    const old = best.get(nKey);
-    if (old !== undefined && cmpCost(old, nc) <= 0) return;
-    best.set(nKey, nc);
-    parent.set(nKey, e);
-    pq.push({ cost: nc, key: nKey });
+  /** 给定到达时限，返回最晚出发仍不迟到的全部并列方案（并列 = 出发时刻相同） */
+  routeArriveAll(fromGid, toGid, deadlineSec) {
+    const net = this.net;
+    const cands = new Set();
+    for (const c of net.corridorsAtStation.get(fromGid) ?? []) {
+      const idx = net.stopIndex(c, fromGid);
+      for (let dir = 0; dir <= 1; dir++) for (const sec of net.table(c, idx, dir)) cands.add(sec);
+    }
+    if (cands.size === 0) return [];
+    const cs = [...cands].sort((a, b) => a - b);
+
+    // 二分出仍能按时到达的最晚出发时刻（到达时刻随出发时刻单调不减）
+    let lo = 0, hi = cs.length - 1, latest = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const plan = this.routeDepart(fromGid, toGid, cs[mid]);
+      if (plan !== null && plan.arriveSec <= deadlineSec) { latest = mid; lo = mid + 1; } else { hi = mid - 1; }
+    }
+    if (latest < 0) return [];
+
+    // 取该出发时刻下全部并列最快方案，再去重与筛选
+    const plans = dedupePlans(this.routeDepartAll(fromGid, toGid, cs[latest]).filter((p) => p.arriveSec <= deadlineSec));
+    let latestBoard = -1;
+    for (const p of plans) if (p.boardSec > latestBoard) latestBoard = p.boardSec;
+    return plans.filter((p) => p.boardSec === latestBoard);
   }
 
-  buildPlan(parent, endKey, startSec, arriveSec) {
-    const net = this.net;
-    const chain = [];
-    for (let k = endKey; ;) {
-      const e = parent.get(k);
-      if (e === undefined) break;
-      chain.push(e);
-      if (e.type === TYPE_START) break;
-      k = e.fromKey;
-    }
-    chain.reverse();
-
+  /**
+   * 把路径还原成方案。
+   * mergeSameLine 为真时把同线同向的连续乘车并成一段（仅多方案枚举用；
+   * 单方案路径保持与原版一致，以便与 Java 版逐字对拍）。
+   */
+  buildPlan(chain, startSec, arriveSec, mergeSameLine = false) {
     const plan = { startSec, boardSec: -1, arriveSec, rows: [] };
     let lastArrive = -1;
     for (const e of chain) {
@@ -379,11 +538,11 @@ export class Router {
         plan.rows.push({ transfer: true, gid: e.fromGid, platformSec: e.arriveSec });
       } else if (e.type === TYPE_RIDE) {
         const last = plan.rows[plan.rows.length - 1];
-        if (last && !last.transfer && last.corridorId === e.corridorId && last.dir === e.dir && lastArrive === e.departSec) {
+        const sameLine = last && !last.transfer && last.corridorId === e.corridorId && last.dir === e.dir;
+        if (sameLine && (mergeSameLine || lastArrive === e.departSec)) {
           this.extendLeg(last, e);
         } else {
-          const leg = this.newLeg(e);
-          plan.rows.push(leg);
+          plan.rows.push(this.newLeg(e));
           if (plan.boardSec < 0) plan.boardSec = e.departSec;
         }
         const lastLeg = plan.rows[plan.rows.length - 1];
@@ -408,19 +567,40 @@ export class Router {
     return { transfer: false, corridorId: e.corridorId, dir: e.dir, boardSec: e.departSec, stopGids, stopArriveSec };
   }
 
-  /** 延长一段行程至 e.toGid（同一班车继续乘坐），新到站以 e.departSec 为锚 */
+  /** 延长一段行程至 e.toGid */
   extendLeg(leg, e) {
     const net = this.net;
     const c = net.corridors.get(e.corridorId);
     const step = net.stepOf(e.corridorId, e.dir);
     const curIdx = net.stopIndex(e.corridorId, leg.stopGids[leg.stopGids.length - 1]);
     const aIdx = net.stopIndex(e.corridorId, e.toGid);
+    const anchor = curIdx;
+    const base = e.departSec;
     for (let i = curIdx + step; ; i += step) {
       leg.stopGids.push(c.stopGids[i]);
-      leg.stopArriveSec.push(e.departSec + net.cumSec(e.corridorId, curIdx, i, this.runSec));
+      leg.stopArriveSec.push(base + net.cumSec(e.corridorId, anchor, i, this.runSec));
       if (i === aIdx) break;
     }
   }
+}
+
+/** 方案签名：按「换乘点 + 各乘车段的线路/方向/上下车站」判定，乘车中途换车不构成不同方案 */
+function planSignature(plan) {
+  return plan.rows.map((r) => (r.transfer
+    ? `T${r.gid}`
+    : `R${r.corridorId}/${r.dir}/${r.stopGids[0]}/${r.stopGids[r.stopGids.length - 1]}`)).join('|');
+}
+
+/** 按换乘次数与候车余量以外的顺序去重，保留先出现的（调用方已按字典序排好） */
+function dedupePlans(plans) {
+  const seen = new Set(), out = [];
+  for (const p of plans) {
+    const sig = planSignature(p);
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    out.push(p);
+  }
+  return out;
 }
 
 /** 方案统计：换乘次数、换乘候车余量合计、经由站数 */
