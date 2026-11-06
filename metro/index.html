@@ -15,11 +15,17 @@
 <main>
   <form class="card" id="form">
     <div class="grid">
+      <label class="field">出发线路
+        <select id="fromLine"></select>
+      </label>
       <label class="field">出发站
-        <div class="suggest"><input id="from" type="text" autocomplete="off" placeholder="如 木渎" required><ul hidden></ul></div>
+        <select id="from" required></select>
+      </label>
+      <label class="field">到达线路
+        <select id="toLine"></select>
       </label>
       <label class="field">到达站
-        <div class="suggest"><input id="to" type="text" autocomplete="off" placeholder="如 桑田岛" required><ul hidden></ul></div>
+        <select id="to" required></select>
       </label>
       <label class="field">星期
         <select id="weekday">

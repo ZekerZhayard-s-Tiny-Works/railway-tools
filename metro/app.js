@@ -1,10 +1,8 @@
 // 苏州地铁路由查询页面：加载 network.json + 所选星期的时刻表，跑 Router 并渲染方案。
 import { Network, Router, planStats, corridorName, formatTime } from './engine.js';
 import { renderText } from './render.js';
-import { attachSuggest } from '../suggest.js';
 
 const $ = (id) => document.getElementById(id);
-const fromInput = $('from'), toInput = $('to');
 
 let raw = null;
 const tablesCache = new Map();   // weekday -> { "走廊|站序": [[秒],[秒]] }
@@ -109,7 +107,7 @@ function renderPlan(net, plans, opts) {
 
 async function run() {
   const st = $('status');
-  const from = fromInput.value.trim(), to = toInput.value.trim();
+  const from = $('from').value, to = $('to').value;
   const weekday = +$('weekday').value;
   const mode = document.querySelector('input[name="mode"]:checked').value;
   const runMin = +$('runMin').value, transferMin = +$('transferMin').value;
@@ -167,8 +165,34 @@ resetNow();
 // 浏览器可能在 pageshow 之后恢复表单状态，稍后再设一次以覆盖
 window.addEventListener('pageshow', () => requestAnimationFrame(resetNow));
 requestAnimationFrame(resetNow);
-const stationNames = [...raw.stations.map((s) => s[2])].filter((v, i, a) => a.indexOf(v) === i);
-attachSuggest(fromInput, fromInput.nextElementSibling, () => stationNames);
-attachSuggest(toInput, toInput.nextElementSibling, () => stationNames);
+// 线路 -> 有序站名（换乘站按所属线路各出现一次，3/11 号线贯通为一条走廊）
+const lineStations = new Map();
+for (const [cid, menuLineIds] of raw.corridors) {
+  const label = menuLineIds.map((i) => `${i}号线`).join('/');
+  lineStations.set(label, raw.stations.filter(([c]) => c === cid).sort((a, b) => a[1] - b[1]).map(([, , name]) => name));
+}
+const lineLabels = [...lineStations.keys()].sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+
+function fillLines(select) {
+  select.innerHTML = lineLabels.map((l) => `<option value="${l}">${l}</option>`).join('');
+}
+
+function fillStations(lineSelect, stationSelect, preferred, pickIndex) {
+  const names = lineStations.get(lineSelect.value) ?? [];
+  stationSelect.innerHTML = names.map((n) => `<option value="${n}">${n}</option>`).join('');
+  stationSelect.value = names.includes(preferred) ? preferred : names[pickIndex(names.length)];
+}
+
+// 切换线路时保留同名车站，否则回到该线路的首站（出发）/ 末站（到达）
+for (const [lineSel, stationSel, pickIndex] of [
+  ['fromLine', 'from', () => 0],
+  ['toLine', 'to', (n) => n - 1],
+]) {
+  const line = $(lineSel), station = $(stationSel);
+  fillLines(line);
+  line.addEventListener('change', () => fillStations(line, station, station.value, pickIndex));
+  fillStations(line, station, '', pickIndex);
+}
+
 $('dataNote').textContent = `时刻表数据快照: ${raw.snapshot}（抓取自时刻表网站；要更新需本地重新抓取后重新部署）`;
 $('status').textContent = '就绪';
