@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
@@ -33,6 +34,8 @@ public final class Router {
         public final int corridorId, dir, boardSec;
         public final List<Integer> stopGids = new ArrayList<>();
         public final List<Integer> stopArriveSec = new ArrayList<>();
+        Network.Run run;   // 所乘列车；toPos 为下车站在该车停站序列中的下标
+        int toPos = -1;
 
         Leg(int corridorId, int dir, int boardSec) {
             this.corridorId = corridorId;
@@ -100,13 +103,11 @@ public final class Router {
 
     private final Network net;
     private final int weekday;
-    private final int runSec;
     private final int transferSec;
 
-    public Router(Network net, int weekday, int runSec, int transferSec) {
+    public Router(Network net, int weekday, int transferSec) {
         this.net = net;
         this.weekday = weekday;
-        this.runSec = runSec;
         this.transferSec = transferSec;
     }
 
@@ -120,9 +121,17 @@ public final class Router {
         final long fromKey;                // 来源状态键（含'刚换乘'标记，用于回溯）
         final int fromGid, fromCorridor;
         final int corridorId, dir, toGid, departSec, arriveSec;
+        final Network.Run run;             // 乘车段所属列车；起讫在该车停站序列中的下标
+        final int fromPos, toPos;
 
         Edge(int type, long fromKey, int fromGid, int fromCorridor,
              int corridorId, int dir, int toGid, int departSec, int arriveSec) {
+            this(type, fromKey, fromGid, fromCorridor, corridorId, dir, toGid, departSec, arriveSec, null, -1, -1);
+        }
+
+        Edge(int type, long fromKey, int fromGid, int fromCorridor,
+             int corridorId, int dir, int toGid, int departSec, int arriveSec,
+             Network.Run run, int fromPos, int toPos) {
             this.type = type;
             this.fromKey = fromKey;
             this.fromGid = fromGid;
@@ -132,6 +141,9 @@ public final class Router {
             this.toGid = toGid;
             this.departSec = departSec;
             this.arriveSec = arriveSec;
+            this.run = run;
+            this.fromPos = fromPos;
+            this.toPos = toPos;
         }
     }
 
@@ -167,16 +179,24 @@ public final class Router {
                 int idx = net.stopIndex(corridor, gid);
                 List<Integer> stops = net.corridors.get(corridor).stopGids();
                 for (int dir = 0; dir <= 1; dir++) {
-                    int dep = nextDeparture(net.table(corridor, idx, weekday, dir), c.time);
-                    if (dep < 0) continue;
-                    // 刚换乘到站台时，这里的候车（dep - 当前时刻）属于该次换乘的间隔
-                    int gapAdd = afterTransfer ? dep - c.time : 0;
-                    int step = net.stepOf(corridor, dir);
-                    for (int nidx = idx + step; nidx >= 0 && nidx < stops.size(); nidx += step) {
-                        int arrive = dep + (int) net.elapsedSec(corridor, idx, nidx, runSec);
-                        relax(best, parent, pq, key(stops.get(nidx), corridor, false),
-                                new Cost(arrive, c.gap + gapAdd, c.count),
-                                new Edge(TYPE_RIDE, k, gid, corridor, corridor, dir, stops.get(nidx), dep, arrive));
+                    List<Network.Boarding> list = net.boardings(corridor, dir, idx, weekday);
+                    int b = firstAtOrAfter(list, c.time);
+                    if (b < 0) continue;
+                    int reachable = net.reachCount(corridor, dir, idx, weekday);
+                    Set<Integer> covered = new HashSet<>();
+                    // 按发车顺序逐班展开；某站首次出现即为最早到达（无越行），此后各班的同一站不再松弛
+                    for (int bi = b; bi < list.size() && covered.size() < reachable; bi++) {
+                        Network.Boarding bd = list.get(bi);
+                        int gapAdd = afterTransfer ? bd.dep - c.time : 0;
+                        for (int s = bd.pos + 1; s < bd.run.size(); s++) {
+                            int nidx = bd.run.idx[s];
+                            if (!covered.add(nidx)) continue;
+                            int arrive = bd.run.sec[s];
+                            relax(best, parent, pq, key(stops.get(nidx), corridor, false),
+                                    new Cost(arrive, c.gap + gapAdd, c.count),
+                                    new Edge(TYPE_RIDE, k, gid, corridor, corridor, dir, stops.get(nidx),
+                                            bd.dep, arrive, bd.run, bd.pos, s));
+                        }
                     }
                 }
                 for (int m : net.corridorsAtStation.getOrDefault(gid, Set.of())) {
@@ -251,65 +271,54 @@ public final class Router {
         Collections.reverse(chain);
 
         Plan plan = new Plan(startSec, -1, arriveSec);
-        int lastArrive = -1;
         for (Edge e : chain) {
             if (e.type == TYPE_TRANSFER) {
                 plan.rows.add(new Transfer(e.fromGid, e.arriveSec));
             } else if (e.type == TYPE_RIDE) {
-                // 同一班车（同走廊同方向）且零间隔续乘的连续边合并为一段，展开中间各站
+                // 同一列车继续乘坐（枚举会把一段车拆成多步）
                 if (!plan.rows.isEmpty() && plan.rows.get(plan.rows.size() - 1) instanceof Leg last
-                        && last.corridorId == e.corridorId && last.dir == e.dir
-                        && lastArrive == e.departSec) {
-                    extendLeg(net, last, e, runSec);
+                        && last.run == e.run && last.toPos == e.fromPos
+                        && last.boardSec == e.run.sec[e.fromPos]) {
+                    extendLeg(net, last, e);
                 } else {
-                    Leg leg = newLeg(net, e, runSec);
+                    Leg leg = newLeg(net, e);
                     plan.rows.add(leg);
                     if (plan.boardSec < 0) plan.boardSec = e.departSec;
                 }
-                Leg lastLeg = (Leg) plan.rows.get(plan.rows.size() - 1);
-                lastArrive = lastLeg.stopArriveSec.get(lastLeg.stopArriveSec.size() - 1);
             }
             // TYPE_START：起点选走廊，仅决定首段从哪条线出发，不产生输出行
         }
         return plan;
     }
 
-    /** 新建一段行程：从上车点到下车点，含中间各站及推算到达时刻 */
-    private Leg newLeg(Network net, Edge e, int runSec) {
+    /** 新建一段行程：取该班车实际停靠的站序与时刻 */
+    private Leg newLeg(Network net, Edge e) {
         var c = net.corridors.get(e.corridorId);
-        int bIdx = net.stopIndex(e.corridorId, e.fromGid), aIdx = net.stopIndex(e.corridorId, e.toGid);
-        int step = net.stepOf(e.corridorId, e.dir);
-        List<Integer> gids = new ArrayList<>(), arrs = new ArrayList<>();
-        gids.add(c.stopGids().get(bIdx));
-        for (int i = bIdx + step; ; i += step) {
-            gids.add(c.stopGids().get(i));
-            arrs.add(e.departSec + (int) net.cumSec(e.corridorId, bIdx, i, runSec));
-            if (i == aIdx) break;
-        }
         Leg leg = new Leg(e.corridorId, e.dir, e.departSec);
-        leg.stopGids.addAll(gids);
-        leg.stopArriveSec.addAll(arrs);
+        leg.run = e.run;
+        leg.toPos = e.toPos;
+        for (int s = e.fromPos; s <= e.toPos; s++) leg.stopGids.add(c.stopGids().get(e.run.idx[s]));
+        for (int s = e.fromPos + 1; s <= e.toPos; s++) leg.stopArriveSec.add(e.run.sec[s]);
         return leg;
     }
 
-    /** 延长一段行程至 e.toGid（同一班车继续乘坐或零间隔续乘），新到站以 e.departSec 为锚 */
-    private void extendLeg(Network net, Leg leg, Edge e, int runSec) {
+    /** 延长一段行程至 e.toPos */
+    private void extendLeg(Network net, Leg leg, Edge e) {
         var c = net.corridors.get(e.corridorId);
-        int step = net.stepOf(e.corridorId, e.dir);
-        int curIdx = net.stopIndex(e.corridorId, leg.stopGids.get(leg.stopGids.size() - 1));
-        int aIdx = net.stopIndex(e.corridorId, e.toGid);
-        for (int i = curIdx + step; ; i += step) {
-            leg.stopGids.add(c.stopGids().get(i));
-            leg.stopArriveSec.add(e.departSec + (int) net.cumSec(e.corridorId, curIdx, i, runSec));
-            if (i == aIdx) break;
+        for (int s = e.fromPos + 1; s <= e.toPos; s++) {
+            leg.stopGids.add(c.stopGids().get(e.run.idx[s]));
+            leg.stopArriveSec.add(e.run.sec[s]);
         }
+        leg.toPos = e.toPos;
     }
 
-    /** 发车时刻表查找：第一个 >= t 的时刻；无则 -1 */
-    static int nextDeparture(int[] sortedSec, int t) {
-        int idx = Arrays.binarySearch(sortedSec, t);
-        if (idx >= 0) return sortedSec[idx];
-        int ins = -(idx + 1);
-        return ins < sortedSec.length ? sortedSec[ins] : -1;
+    /** 可上列车列表（按发车升序）中第一个 dep >= t 的下标；无则 -1 */
+    static int firstAtOrAfter(List<Network.Boarding> list, int t) {
+        int lo = 0, hi = list.size();
+        while (lo < hi) {
+            int mid = (lo + hi) >>> 1;
+            if (list.get(mid).dep < t) lo = mid + 1; else hi = mid;
+        }
+        return lo < list.size() ? lo : -1;
     }
 }

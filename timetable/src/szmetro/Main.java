@@ -36,7 +36,7 @@ public final class Main {
         String from, to;
         Integer departSec, arriveSec;
         Integer weekday;
-        double runMin = 2.0, transferMin = 5.0;
+        double transferMin = 5.0;
         boolean refresh, allWeekdays;
         Path cacheDir = Path.of("temp", "cache");
     }
@@ -55,11 +55,6 @@ public final class Main {
                     int wd = Integer.parseInt(need(args, ++i, a));
                     if (wd < 1 || wd > 7) throw new CliError("--weekday 取值 1..7（1=周一）");
                     o.weekday = wd;
-                }
-                case "--run-min" -> {
-                    double v = Double.parseDouble(need(args, ++i, a));
-                    if (v <= 0 || v > 30) throw new CliError("--run-min 应在 (0, 30] 之间");
-                    o.runMin = v;
                 }
                 case "--transfer-min" -> {
                     double v = Double.parseDouble(need(args, ++i, a));
@@ -124,7 +119,7 @@ public final class Main {
         if (from == null) throw new CliError("未找到车站「" + o.from + "」" + suggest(net, o.from));
         if (to == null) throw new CliError("未找到车站「" + o.to + "」" + suggest(net, o.to));
 
-        Router router = new Router(net, weekday, (int) Math.round(o.runMin * 60), (int) Math.round(o.transferMin * 60));
+        Router router = new Router(net, weekday, (int) Math.round(o.transferMin * 60));
         Router.Plan plan = o.departSec != null
                 ? router.routeDepart(from, to, o.departSec)
                 : router.routeArrive(from, to, o.arriveSec);
@@ -132,13 +127,13 @@ public final class Main {
         String wdName = "周" + "一二三四五六日".charAt(weekday - 1);
         System.out.println("＝" + "＝".repeat(28));
         if (o.departSec != null) {
-            System.out.printf("查询: %s → %s（%s %s 后出发，站间 %.1f 分钟 / 换乘 %.0f 分钟）%n",
-                    o.from, o.to, wdName, fmt(o.departSec), o.runMin, o.transferMin);
+            System.out.printf("查询: %s → %s（%s %s 后出发，换乘 %.0f 分钟）%n",
+                    o.from, o.to, wdName, fmt(o.departSec), o.transferMin);
         } else {
-            System.out.printf("查询: %s → %s（%s %s 前到达，站间 %.1f 分钟 / 换乘 %.0f 分钟）%n",
-                    o.from, o.to, wdName, fmt(o.arriveSec), o.runMin, o.transferMin);
+            System.out.printf("查询: %s → %s（%s %s 前到达，换乘 %.0f 分钟）%n",
+                    o.from, o.to, wdName, fmt(o.arriveSec), o.transferMin);
         }
-        System.out.println("（时刻表: " + Crawler.BASE + " ；站间运行与换乘时间为估计参数，");
+        System.out.println("（时刻表: " + Crawler.BASE + " ；行车时刻取自时刻表，换乘耗时为估计参数，");
         System.out.println("  多条可行经由时按 时间 → 换乘候车余量合计最长 → 换乘次数最少 取舍，结果仅供参考）");
 
         if (plan == null) {
@@ -233,7 +228,6 @@ public final class Main {
                   --depart HH:MM      此时刻出发，求最早到达
                   --arrive HH:MM      此时刻前到达，求最晚出发
                   --weekday 1..7      星期（1=周一，缺省=今天）
-                  --run-min 数        站间运行分钟数（缺省 2，取自相邻站时刻表偏移众数）
                   --transfer-min 数   同名站跨线换乘分钟数（缺省 5）
                   --refresh           强制重新抓取缓存
                   --all-weekdays      crawl 模式抓取周一至周日全部时刻表

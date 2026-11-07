@@ -7,6 +7,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -41,10 +42,34 @@ public final class Network {
     public final Map<Integer, Set<Integer>> corridorsAtStation = new HashMap<>();
     /** "走廊|站序|星期" -> [方向0时刻[], 方向1时刻[]]（秒，升序去重） */
     public final Map<String, int[][]> tables = new HashMap<>();
-    /** 方向 0 沿走廊站序的行进步长（+1 = 往走廊末站）；方向 1 与之相反 */
-    public final Map<Integer, Integer> dir0Step = new HashMap<>();
     /** 走廊 -> 站对运行时间矩阵 [i][j] = 第 i 站乘到第 j 站的官网同线时间（秒），-1 = 无数据 */
     public final Map<Integer, int[][]> pairMatrix = new HashMap<>();
+    /** 星期 -> 列车运行图索引（懒构建，算法与 site/metro/engine.js 的 buildRuns 逐行一致） */
+    private final Map<Integer, WeekRuns> weekRuns = new HashMap<>();
+
+    /** 一列车的停站序列：idx[k] 走廊站序，sec[k] 时刻（末站为到达时刻，非发车） */
+    public static final class Run {
+        public final int[] idx, sec;
+        Run(int[] idx, int[] sec) { this.idx = idx; this.sec = sec; }
+        public int size() { return idx.length; }
+    }
+
+    /** 某站可上车的一班车：dep 发车秒，run 所属运行图，pos 上车在该车停站序列中的下标 */
+    public static final class Boarding {
+        public final int dep, pos;
+        public final Run run;
+        Boarding(int dep, int pos, Run run) { this.dep = dep; this.pos = pos; this.run = run; }
+    }
+
+    /** 某星期的运行图：cid|dir -> 列车列表；cid|dir|idx -> 可上车列表（升序）；cid|dir|idx -> 可达下游站数 */
+    public static final class WeekRuns {
+        final Map<String, List<Run>> runs = new HashMap<>();
+        final Map<String, List<Boarding>> boardAt = new HashMap<>();
+        final Map<String, Integer> reachAt = new HashMap<>();
+    }
+
+    /** 官网站名用「/」分隔（苏州园区/火车站、陆慕/古巷），时刻表来源是连写，统一去掉「/」再匹配 */
+    static String normName(String s) { return s.replace("/", ""); }
 
     public static Network load(Path cacheDir) throws IOException {
         Network n = new Network();
@@ -154,18 +179,10 @@ public final class Network {
             Corridor old = e.getValue();
             List<String> names = old.stopNames();
             String l0 = d0Label.get(cid), l1 = d1Label.get(cid);
-            int step;
-            if (l0 == null) {
-                step = 0; // 该走廊尚无任何时刻表数据
-            } else if (l0.equals(names.get(names.size() - 1))) {
-                step = +1;
-            } else if (l0.equals(names.get(0))) {
-                step = -1;
-            } else {
+            // 方向标签（往某站）取自时刻表；校验其必须是走廊端点，防止站序或标签错乱
+            if (l0 != null && !l0.equals(names.get(0)) && !l0.equals(names.get(names.size() - 1)))
                 throw new IOException("走廊 " + cid + " 方向标签(" + l0 + "/" + l1
                         + ")与车站端点(" + names.get(0) + "/" + names.get(names.size() - 1) + ")不匹配");
-            }
-            n.dir0Step.put(cid, step);
             if (l0 != null)
                 n.corridors.put(cid, new Corridor(cid, old.menuLineIds(), old.stopGids(), names, l0, l1));
         }
@@ -185,7 +202,7 @@ public final class Network {
             }
             for (var e : order.entrySet()) {
                 Map<String, Integer> pos = new HashMap<>();
-                for (int i = 0; i < e.getValue().size(); i++) pos.put(e.getValue().get(i), i);
+                for (int i = 0; i < e.getValue().size(); i++) pos.put(normName(e.getValue().get(i)), i);
                 offPos.put(e.getKey(), pos);
                 offPair.put(e.getKey(), new int[e.getValue().size()][e.getValue().size()][2]);
             }
@@ -198,7 +215,7 @@ public final class Network {
                 Map<String, Integer> pos = offPos.get(p[0]);
                 int[][][] tri = offPair.get(p[0]);
                 if (pos == null || tri == null) continue;
-                Integer pi = pos.get(p[1]), pj = pos.get(p[2]);
+                Integer pi = pos.get(normName(p[1])), pj = pos.get(normName(p[2]));
                 if (pi == null || pj == null || pi >= pj) continue;
                 if (!p[3].isBlank()) tri[pi][pj][0] = Integer.parseInt(p[3]) * 60;
                 if (!p[4].isBlank()) tri[pi][pj][1] = Integer.parseInt(p[4]) * 60;
@@ -215,7 +232,8 @@ public final class Network {
             int[][] mat = new int[sz][sz];
             for (int[] row : mat) Arrays.fill(row, -1);
             record CorrLine(Map<String, Integer> offIdx, boolean sameDir) {}
-            Map<String, CorrLine> corrLines = new HashMap<>(); // 官网线路名 -> (站名 -> 官网线内序号, 与走廊同向?)
+            // 用 LinkedHashMap 保证按 menuLineIds 顺序选取，与 JS 版一致（跨线共享站对取先出现的线路）
+            Map<String, CorrLine> corrLines = new LinkedHashMap<>(); // 官网线路名 -> (站名 -> 官网线内序号, 与走廊同向?)
             for (int menuLine : e.getValue().menuLineIds()) {
                 String lname = menuLine + "号线";
                 Map<String, Integer> pos = offPos.get(lname);
@@ -225,7 +243,7 @@ public final class Network {
                 int firstOffIdx = -1, lastOffIdx = -1;
                 int n_ = pos.size();
                 for (var pe : pos.entrySet()) {
-                    int cIdx = names.indexOf(pe.getKey());
+                    int cIdx = names.indexOf(pe.getKey()); // names 来自时刻表，无「/」
                     if (cIdx < 0) continue;
                     offIdx.put(pe.getKey(), pe.getValue());
                     if (pe.getValue() == 0) firstOffIdx = cIdx;
@@ -241,8 +259,8 @@ public final class Network {
             for (int i = 0; i < sz; i++) {
                 for (int j = i + 1; j < sz; j++) {
                     for (var ce : corrLines.entrySet()) {
-                        Integer pi = ce.getValue().offIdx().get(names.get(i));
-                        Integer pj = ce.getValue().offIdx().get(names.get(j));
+                        Integer pi = ce.getValue().offIdx().get(normName(names.get(i)));
+                        Integer pj = ce.getValue().offIdx().get(normName(names.get(j)));
                         if (pi == null || pj == null || pi.equals(pj)) continue;
                         int[][][] tri = offPair.get(ce.getKey());
                         int hi = Math.min(pi, pj), lo = Math.max(pi, pj);
@@ -261,6 +279,192 @@ public final class Network {
             n.pairMatrix.put(cid, mat);
         }
         return n;
+    }
+
+    /** 某走廊某方向某站可上的列车（按发车时刻升序） */
+    public List<Boarding> boardings(int cid, int dir, int idx, int weekday) {
+        return runs(weekday).boardAt.getOrDefault(cid + "|" + dir + "|" + idx, List.of());
+    }
+
+    /** 某站起该方向可达的下游站数（用于提前结束逐班展开） */
+    public int reachCount(int cid, int dir, int idx, int weekday) {
+        return runs(weekday).reachAt.getOrDefault(cid + "|" + dir + "|" + idx, 0);
+    }
+
+    /** 某星期的运行图（首次调用时构建并缓存） */
+    public WeekRuns runs(int weekday) {
+        WeekRuns wr = weekRuns.get(weekday);
+        if (wr == null) weekRuns.put(weekday, wr = buildRuns(weekday));
+        return wr;
+    }
+
+    /**
+     * 由逐站时刻表重建列车运行图（算法与 site/metro/engine.js 的 buildRuns 逐行一致）。
+     * 站点页只列停靠时刻（大站快车跳过的站没有），终点站（含小交路终到站如 6 号线南斜步）不记到达时刻，因此：
+     *   - 相邻站按「无越行」顺序配对，hop 取官网相邻时间，配不上再用逐时扫描找最佳；
+     *   - 配对率过低（<80%）视为运营分界，不跨段串联（6 号线南斜步两段小交路即靠此判定）；
+     *   - 未配上的车视为到前方最近站终到，到达时刻 = 末次发车 + hop。
+     */
+    private WeekRuns buildRuns(int weekday) {
+        final int TOL = 60;
+        final double MIN_RATE = 0.8;
+        WeekRuns wr = new WeekRuns();
+        for (var e : corridors.entrySet()) {
+            int cid = e.getKey();
+            List<Integer> gids = e.getValue().stopGids();
+            List<String> names = e.getValue().stopNames();
+            int N = gids.size();
+            int[][] mat = pairMatrix.get(cid);
+            for (int dir = 0; dir <= 1; dir++) {
+                int[] order = new int[N];
+                for (int p = 0; p < N; p++) order[p] = dir == 0 ? p : N - 1 - p;
+                int[][] deps = new int[N][];
+                for (int p = 0; p < N; p++) deps[p] = table(cid, order[p], weekday, dir);
+                int[] hop = new int[N - 1];
+                for (int p = 0; p < N - 1; p++)
+                    hop[p] = pickHop(deps[p], deps[p + 1], mat[order[p]][order[p + 1]], TOL);
+
+                // 相邻站配对：next[p][i] = p+1 站的下标，-1 表示该车不在下一站停靠
+                int[][] next = new int[N][], prev = new int[N][], nextPos = new int[N][];
+                boolean[] boundary = new boolean[N];
+                for (int p = 0; p < N; p++) {
+                    next[p] = new int[deps[p].length];
+                    prev[p] = new int[deps[p].length];
+                    nextPos[p] = new int[deps[p].length];
+                    Arrays.fill(next[p], -1);
+                    Arrays.fill(prev[p], -1);
+                }
+                for (int p = 0; p < N - 1; p++) {
+                    if (deps[p].length == 0 || deps[p + 1].length == 0) { boundary[p] = true; continue; }
+                    int[] a = deps[p], b = deps[p + 1];
+                    int[][] pairs = matchPairs(a, b, hop[p], TOL);
+                    double rate = Math.min((double) pairs.length / a.length, (double) pairs.length / b.length);
+                    boundary[p] = rate < MIN_RATE;
+                    if (boundary[p]) continue;
+                    for (int[] pr : pairs) {
+                        next[p][pr[0]] = pr[1];
+                        nextPos[p][pr[0]] = p + 1;
+                        prev[p + 1][pr[1]] = pr[0];
+                    }
+                }
+                // 跳站补链：本站有车、下一站无，但下下站时刻吻合（大站快车）
+                for (int p = 0; p + 2 < N; p++) {
+                    if (boundary[p] || boundary[p + 1]) continue;
+                    for (int i = 0; i < deps[p].length; i++) {
+                        if (next[p][i] >= 0) continue;
+                        int expect = deps[p][i] + hop[p] + hop[p + 1];
+                        for (int j = 0; j < deps[p + 2].length; j++) {
+                            if (prev[p + 2][j] >= 0) continue;
+                            if (Math.abs(deps[p + 2][j] - expect) <= TOL) {
+                                next[p][i] = j;
+                                nextPos[p][i] = p + 2;
+                                prev[p + 2][j] = i;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // 串联成列车
+                List<Run> runs = new ArrayList<>();
+                boolean[][] seen = new boolean[N][];
+                for (int p = 0; p < N; p++) seen[p] = new boolean[deps[p].length];
+                for (int p = 0; p < N; p++) {
+                    for (int i = 0; i < deps[p].length; i++) {
+                        if (seen[p][i] || prev[p][i] >= 0) continue;
+                        IntList si = new IntList(), ss = new IntList();
+                        int pp = p, ii = i;
+                        while (pp >= 0) {
+                            seen[pp][ii] = true;
+                            si.add(order[pp]);
+                            ss.add(deps[pp][ii]);
+                            int nj = next[pp][ii];
+                            int np = nextPos[pp][ii];
+                            pp = nj >= 0 ? np : -1;
+                            ii = nj;
+                        }
+                        runs.add(new Run(si.toArray(), ss.toArray()));
+                    }
+                }
+                // 终到时刻：末次发车 + 至下一站的 hop（终点站/小交路终到站均不记到达时刻）
+                List<Run> finished = new ArrayList<>(runs.size());
+                for (Run run : runs) {
+                    int lastIdx = run.idx[run.size() - 1];
+                    int p = dir == 0 ? lastIdx : N - 1 - lastIdx;
+                    if (p >= N - 1) { finished.add(run); continue; }
+                    int[] ni = Arrays.copyOf(run.idx, run.size() + 1);
+                    int[] ns = Arrays.copyOf(run.sec, run.size() + 1);
+                    ni[run.size()] = order[p + 1];
+                    ns[run.size()] = run.sec[run.size() - 1] + hop[p];
+                    finished.add(new Run(ni, ns));
+                }
+                runs = finished;
+
+                wr.runs.put(cid + "|" + dir, runs);
+                for (Run run : runs) {
+                    for (int k = 0; k < run.size() - 1; k++) {  // 末站是到达，不能上车
+                        String key = cid + "|" + dir + "|" + run.idx[k];
+                        wr.boardAt.computeIfAbsent(key, x -> new ArrayList<>())
+                                .add(new Boarding(run.sec[k], k, run));
+                    }
+                }
+            }
+        }
+        for (var e : wr.boardAt.entrySet()) {
+            e.getValue().sort((x, y) -> Integer.compare(x.dep, y.dep));
+            Set<Integer> seen = new HashSet<>();
+            for (Boarding b : e.getValue())
+                for (int s = b.pos + 1; s < b.run.size(); s++) seen.add(b.run.idx[s]);
+            wr.reachAt.put(e.getKey(), seen.size());
+        }
+        return wr;
+    }
+
+    /** 相邻段 hop：官网相邻时间优先；试遍 1..10 分钟，取配对数最多者（已全配对时立即返回） */
+    private static int pickHop(int[] a, int[] b, int off, int tol) {
+        if (a.length == 0 || b.length == 0) return off > 0 ? off : 120;
+        int best = off > 0 ? off : 0, bestN = off > 0 ? countMatch(a, b, off, tol) : -1;
+        if (bestN >= a.length) return best;
+        for (int h = 60; h <= 600; h += 60) {
+            int n = countMatch(a, b, h, tol);
+            if (n > bestN) { bestN = n; best = h; if (n >= a.length) break; }
+        }
+        return best > 0 ? best : 120;
+    }
+
+    /** 顺序配对：返回 [[i, j], ...]（同 site/metro/engine.js 的 match） */
+    private static int[][] matchPairs(int[] a, int[] b, int hop, int tol) {
+        IntList out = new IntList();
+        int i = 0, j = 0;
+        while (i < a.length && j < b.length) {
+            int d = b[j] - a[i] - hop;
+            if (Math.abs(d) <= tol) { out.add(i); out.add(j); i++; j++; }
+            else if (d < 0) j++;
+            else i++;
+        }
+        int[] flat = out.toArray();
+        int[][] pairs = new int[flat.length / 2][2];
+        for (int k = 0; k < pairs.length; k++) { pairs[k][0] = flat[2 * k]; pairs[k][1] = flat[2 * k + 1]; }
+        return pairs;
+    }
+
+    private static int countMatch(int[] a, int[] b, int hop, int tol) {
+        int i = 0, j = 0, c = 0;
+        while (i < a.length && j < b.length) {
+            int d = b[j] - a[i] - hop;
+            if (Math.abs(d) <= tol) { c++; i++; j++; }
+            else if (d < 0) j++;
+            else i++;
+        }
+        return c;
+    }
+
+    /** 简易 int 动态数组（避免装箱） */
+    private static final class IntList {
+        private int[] a = new int[16];
+        private int n;
+        void add(int v) { if (n == a.length) a = Arrays.copyOf(a, n * 2); a[n++] = v; }
+        int[] toArray() { return Arrays.copyOf(a, n); }
     }
 
     /**
@@ -313,12 +517,6 @@ public final class Network {
     public int[] table(int corridorId, int idx, int weekday, int dir) {
         int[][] t = tables.get(corridorId + "|" + idx + "|" + weekday);
         return t == null ? new int[0] : t[dir];
-    }
-
-    /** 方向 dir（0/1）沿走廊站序的行进步长 */
-    public int stepOf(int corridorId, int dir) {
-        int s = dir0Step.get(corridorId);
-        return dir == 0 ? s : -s;
     }
 
     public int stopIndex(int corridorId, int gid) {
