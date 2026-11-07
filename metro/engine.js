@@ -2,6 +2,8 @@
 // 数据由 tools/build-metro-data.mjs 从 timetable 项目的抓取缓存生成：
 //   network.json = { corridors, stations, labels, officialLines, officialPairs }
 //   tt_w{N}.json = { "走廊|站序": [方向0发车秒[], 方向1发车秒[]] }
+// 载入时由逐站时刻表重建列车运行图（Network.buildRuns）：只有官网相邻站对时间可用
+// （远距离站对是全网最短时间，含换乘），终点站与小交路终到站的到达时刻需推算。
 
 export class Network {
   constructor() {
@@ -9,8 +11,10 @@ export class Network {
     this.gidOfName = new Map();
     this.nameOfGid = [];
     this.corridorsAtStation = new Map(); // gid -> [cid]（升序）
-    this.dir0Step = new Map();
-    this.pairMatrix = new Map();         // cid -> [i][j] = i 乘到 j 的秒数，-1 无数据
+    this.pairMatrix = new Map();         // cid -> [i][j] = 官网站对秒数，-1 无数据（仅取相邻项）
+    this.runs = new Map();               // "cid|dir" -> 列车运行图 [run]
+    this.boardAt = new Map();            // "cid|dir|idx" -> [{dep, run, pos}]（升序）
+    this.reachAt = new Map();            // "cid|dir|idx" -> 该方向上可达下游站数
     this.tables = new Map();             // "cid|idx" -> [方向0秒[], 方向1秒[]]
   }
 
@@ -50,33 +54,26 @@ export class Network {
 
     n.tables = new Map(Object.entries(weekTables));
 
-    // 方向 0 的站序步长：标签是走廊末站则 +1，是首站则 -1
+    // 方向标签（往某站）取自时刻表；校验其必须是走廊端点，防止站序或标签错乱
     for (const [cid, c] of n.corridors) {
       const lab = (raw.labels ?? {})[cid];
       const l0 = lab ? lab.split('|').find((s) => s.startsWith('0:'))?.slice(2).trim() ?? null : null;
       const l1 = lab ? lab.split('|').find((s) => s.startsWith('1:'))?.slice(2).trim() ?? null : null;
-      let step;
-      if (l0 == null) {
-        step = 0;
-      } else if (l0 === c.stopNames[c.stopNames.length - 1]) {
-        step = 1;
-      } else if (l0 === c.stopNames[0]) {
-        step = -1;
-      } else {
+      if (l0 != null && l0 !== c.stopNames[0] && l0 !== c.stopNames[c.stopNames.length - 1])
         throw new Error(`走廊 ${cid} 方向标签(${l0}/${l1})与车站端点(${c.stopNames[0]}/${c.stopNames[c.stopNames.length - 1]})不匹配`);
-      }
-      n.dir0Step.set(cid, step);
       c.d0Label = l0;
       c.d1Label = l1;
     }
 
-    // 官网同线站对时间
+    // 官网同线站对时间。官网站名用「/」分隔（如 苏州园区/火车站、陆慕/古巷），
+    // 时刻表来源是连写，故统一去掉「/」再匹配
+    const normName = (s) => s.replace(/\//g, '');
     const offPos = new Map(), offPair = new Map();
     for (const [lineName, idx, name] of raw.officialLines) {
       let pos = offPos.get(lineName);
       if (!pos) { offPos.set(lineName, (pos = new Map())); offPair.set(lineName, []); }
-      pos.set(name, idx);
-      offPair.get(lineName)[idx] = name;
+      pos.set(normName(name), idx);
+      offPair.get(lineName)[idx] = normName(name);
     }
     for (const [lineName, names] of offPair) {
       const sz = names.length;
@@ -90,7 +87,7 @@ export class Network {
     for (const [lineName, a, b, fwd, bwd] of raw.officialPairs) {
       const pos = offPos.get(lineName), tri = offPair.get(lineName);
       if (!pos || !tri) continue;
-      const pi = pos.get(a), pj = pos.get(b);
+      const pi = pos.get(normName(a)), pj = pos.get(normName(b));
       if (pi === undefined || pj === undefined || pi >= pj) continue;
       if (fwd) tri[pi][pj][0] = fwd * 60;
       if (bwd) tri[pi][pj][1] = bwd * 60;
@@ -125,7 +122,7 @@ export class Network {
       for (let i = 0; i < sz; i++) {
         for (let j = i + 1; j < sz; j++) {
           for (const [lname, cl] of corrLines) {
-            const pi = cl.offIdx.get(names[i]), pj = cl.offIdx.get(names[j]);
+            const pi = cl.offIdx.get(normName(names[i])), pj = cl.offIdx.get(normName(names[j]));
             if (pi === undefined || pj === undefined || pi === pj) continue;
             const tri = offPair.get(lname);
             const hi = Math.min(pi, pj), lo = Math.max(pi, pj);
@@ -141,43 +138,141 @@ export class Network {
       }
       n.pairMatrix.set(cid, mat);
     }
+    n.buildRuns();
     return n;
   }
 
-  /** 沿走廊从 fromIdx 乘到 toIdx 的秒数：官网站对优先，缺失退化为逐段累加 */
-  elapsedSec(cid, fromIdx, toIdx, fallbackSec) {
-    if (fromIdx === toIdx) return 0;
-    const mat = this.pairMatrix.get(cid);
-    if (mat && mat[fromIdx][toIdx] > 0) return mat[fromIdx][toIdx];
-    return this.hopSum(cid, fromIdx, toIdx, fallbackSec);
-  }
+  /**
+   * 由逐站时刻表重建列车运行图。
+   * 站点页只列停靠时刻（大站快车跳过的站没有），终点站（含小交路终到站）不记到达时刻，
+   * 因此：
+   *   - 相邻站按「无越行」顺序配对，hop 取官网相邻时间（不准时才用相互关推算）；
+   *   - 配对率过低（<80%）视为运营分界（如 6 号线南斜步：两段小交路不贯通），不跨段串联；
+   *   - 未配上的车视为到前方最近站终到，到达时刻 = 末次发车 + hop。
+   */
+  buildRuns() {
+    const TOL = 60;        // 时刻配对容差（秒）
+    const MIN_RATE = 0.8;  // 配对率下限，低于此判为运营分界
+    const match = (a, b, hop, tol = TOL) => {
+      const pairs = [];
+      let i = 0, j = 0;
+      while (i < a.length && j < b.length) {
+        const d = b[j] - a[i] - hop;
+        if (Math.abs(d) <= tol) { pairs.push([i, j]); i++; j++; }
+        else if (d < 0) j++;
+        else i++;
+      }
+      return pairs;
+    };
+    const pickHop = (a, b, off) => {
+      if (!a.length || !b.length) return off > 0 ? off : 120;
+      let best = off > 0 ? off : 0, bestN = off > 0 ? match(a, b, off).length : -1;
+      if (bestN >= a.length) return best;  // 已全配对上，无需再试
+      for (let h = 60; h <= 600; h += 60) {
+        const n = match(a, b, h).length;
+        if (n > bestN) { bestN = n; best = h; if (n >= a.length) break; }
+      }
+      return best > 0 ? best : 120;
+    };
 
-  /** 上车点 boardIdx 到第 k 站的累计秒数 */
-  cumSec(cid, boardIdx, k, fallbackSec) {
-    const mat = this.pairMatrix.get(cid);
-    if (mat && mat[boardIdx][k] > 0) return mat[boardIdx][k];
-    return this.hopSum(cid, boardIdx, k, fallbackSec);
-  }
+    for (const [cid, c] of this.corridors) {
+      const N = c.stopGids.length, mat = this.pairMatrix.get(cid);
 
-  hopSum(cid, fromIdx, toIdx, fallbackSec) {
-    const step = toIdx > fromIdx ? 1 : -1;
-    let total = 0;
-    for (let i = fromIdx; i !== toIdx; i += step) {
-      const mat = this.pairMatrix.get(cid);
-      const v = mat ? mat[i][i + step] : -1;
-      total += v > 0 ? v : fallbackSec;
+      for (let dir = 0; dir <= 1; dir++) {
+        const order = [];
+        for (let p = 0; p < N; p++) order.push(dir === 0 ? p : N - 1 - p);
+        const deps = order.map((i) => this.table(cid, i, dir));
+        const hop = [];
+        for (let p = 0; p < N - 1; p++) hop.push(pickHop(deps[p], deps[p + 1], mat[order[p]][order[p + 1]]));
+
+        const next = new Map(), prev = new Map();
+        const boundary = [];
+        for (let p = 0; p < N - 1; p++) {
+          const A = deps[p], B = deps[p + 1];
+          if (!A.length || !B.length) { boundary.push(true); continue; }
+          const pairs = match(A, B, hop[p]);
+          const rate = Math.min(pairs.length / A.length, pairs.length / B.length);
+          boundary.push(rate < MIN_RATE);
+          if (rate < MIN_RATE) continue;
+          for (const [i, j] of pairs) {
+            next.set(`${p}|${i}`, `${p + 1}|${j}`);
+            prev.set(`${p + 1}|${j}`, `${p}|${i}`);
+          }
+        }
+        // 跳站补链：本站有车、下一站无，但下下站时刻吻合（大站快车）
+        for (let p = 0; p + 2 < N; p++) {
+          if (boundary[p] || boundary[p + 1]) continue;
+          for (let i = 0; i < deps[p].length; i++) {
+            if (next.has(`${p}|${i}`)) continue;
+            const expect = deps[p][i] + hop[p] + hop[p + 1];
+            for (let j = 0; j < deps[p + 2].length; j++) {
+              if (prev.has(`${p + 2}|${j}`)) continue;
+              if (Math.abs(deps[p + 2][j] - expect) <= TOL) {
+                next.set(`${p}|${i}`, `${p + 2}|${j}`);
+                prev.set(`${p + 2}|${j}`, `${p}|${i}`);
+                break;
+              }
+            }
+          }
+        }
+
+        const runs = [], seen = new Set();
+        for (let p = 0; p < N; p++) {
+          for (let i = 0; i < deps[p].length; i++) {
+            const key = `${p}|${i}`;
+            if (seen.has(key) || prev.has(key)) continue;
+            const stops = [];
+            let cur = key;
+            while (cur) {
+              seen.add(cur);
+              const [pp, ii] = cur.split('|').map(Number);
+              stops.push([order[pp], deps[pp][ii]]);
+              cur = next.get(cur);
+            }
+            runs.push({ stops });
+          }
+        }
+        // 终到时刻：末次发车 + 至下一站的 hop（终点站/小交路终到站均不记到达时刻）
+        for (const run of runs) {
+          const last = run.stops[run.stops.length - 1];
+          const p = dir === 0 ? last[0] : N - 1 - last[0];
+          if (p < N - 1) run.stops.push([order[p + 1], last[1] + hop[p]]);
+        }
+
+        this.runs.set(`${cid}|${dir}`, runs);
+        for (const run of runs) {
+          for (let k = 0; k < run.stops.length - 1; k++) {  // 末站是到达，不能上车
+            const key = `${cid}|${dir}|${run.stops[k][0]}`;
+            let list = this.boardAt.get(key);
+            if (!list) this.boardAt.set(key, (list = []));
+            list.push({ dep: run.stops[k][1], run, pos: k });
+          }
+        }
+      }
     }
-    return total;
+    for (const [key, list] of this.boardAt) {
+      list.sort((a, b) => a.dep - b.dep);
+      const seen = new Set();
+      for (const { run, pos } of list) {
+        for (let s = pos + 1; s < run.stops.length; s++) seen.add(run.stops[s][0]);
+      }
+      this.reachAt.set(key, seen.size);
+    }
+  }
+
+  /** 某走廊某方向某站可上的列车（按发车时刻升序） */
+  boardings(cid, dir, idx) {
+    return this.boardAt.get(`${cid}|${dir}|${idx}`) ?? [];
+  }
+
+  /** 某站起该方向可达的下游站数（用于提前结束逐班展开） */
+  reachCount(cid, dir, idx) {
+    return this.reachAt.get(`${cid}|${dir}|${idx}`) ?? 0;
   }
 
   table(cid, idx, dir) {
     const t = this.tables.get(`${cid}|${idx}`);
     return t ? t[dir] : [];
-  }
-
-  stepOf(cid, dir) {
-    const s = this.dir0Step.get(cid) ?? 0;
-    return dir === 0 ? s : -s;
   }
 
   stopIndex(cid, gid) {
@@ -258,20 +353,19 @@ class Heap {
   }
 }
 
-/** 发车时刻表查找：第一个 >= t 的时刻；无则 -1 */
-function nextDeparture(sortedSec, t) {
-  let lo = 0, hi = sortedSec.length;
+/** 可上列车列表（按发车升序）中第一个 dep >= t 的下标；无则 -1 */
+function firstAtOrAfter(list, t) {
+  let lo = 0, hi = list.length;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
-    if (sortedSec[mid] < t) lo = mid + 1; else hi = mid;
+    if (list[mid].dep < t) lo = mid + 1; else hi = mid;
   }
-  return lo < sortedSec.length ? sortedSec[lo] : -1;
+  return lo < list.length ? lo : -1;
 }
 
 export class Router {
-  constructor(net, runSec, transferSec) {
+  constructor(net, transferSec) {
     this.net = net;
-    this.runSec = runSec;
     this.transferSec = transferSec;
   }
 
@@ -303,14 +397,23 @@ export class Router {
       const idx = net.stopIndex(corridor, gid);
       const stops = net.corridors.get(corridor).stopGids;
       for (let dir = 0; dir <= 1; dir++) {
-        const dep = nextDeparture(net.table(corridor, idx, dir), c.time);
-        if (dep < 0) continue;
-        const gapAdd = afterTransfer ? dep - c.time : 0;
-        const step = net.stepOf(corridor, dir);
-        for (let nidx = idx + step; nidx >= 0 && nidx < stops.length; nidx += step) {
-          const arrive = dep + net.elapsedSec(corridor, idx, nidx, this.runSec);
-          this.relaxEdge(bestCost, parent, pq, key(stops[nidx], corridor, false), { time: arrive, gap: c.gap + gapAdd, count: c.count },
-            { type: TYPE_RIDE, fromGid: gid, fromCorridor: corridor, corridorId: corridor, dir, toGid: stops[nidx], departSec: dep, arriveSec: arrive }, k);
+        const list = net.boardings(corridor, dir, idx);
+        const b = firstAtOrAfter(list, c.time);
+        if (b < 0) continue;
+        const reachable = net.reachCount(corridor, dir, idx);
+        const covered = new Set();
+        // 按发车顺序逐班展开；某站首次出现即为最早到达（无越行），此后各班的同一站不再松弛
+        for (let bi = b; bi < list.length && covered.size < reachable; bi++) {
+          const { run, pos, dep } = list[bi];
+          const gapAdd = afterTransfer ? dep - c.time : 0;
+          for (let s = pos + 1; s < run.stops.length; s++) {
+            const nidx = run.stops[s][0];
+            if (covered.has(nidx)) continue;
+            covered.add(nidx);
+            const arrive = run.stops[s][1];
+            this.relaxEdge(bestCost, parent, pq, key(stops[nidx], corridor, false), { time: arrive, gap: c.gap + gapAdd, count: c.count },
+              { type: TYPE_RIDE, fromGid: gid, fromCorridor: corridor, corridorId: corridor, dir, toGid: stops[nidx], run, fromPos: pos, toPos: s, departSec: dep, arriveSec: arrive }, k);
+          }
         }
       }
       for (const m of net.corridorsAtStation.get(gid) ?? []) {
@@ -378,14 +481,22 @@ export class Router {
       }
       const stops = net.corridors.get(corridor).stopGids;
       for (let dir = 0; dir <= 1; dir++) {
-        const dep = nextDeparture(net.table(corridor, idx, dir), c.time);
-        if (dep < 0) continue;
-        const gapAdd = afterTransfer ? dep - c.time : 0;
-        const step = net.stepOf(corridor, dir);
-        for (let nidx = idx + step; nidx >= 0 && nidx < stops.length; nidx += step) {
-          this.relaxCost(bestCost, pq, key(stops[nidx], corridor, false), {
-            time: dep + net.elapsedSec(corridor, idx, nidx, this.runSec), gap: c.gap + gapAdd, count: c.count,
-          });
+        const list = net.boardings(corridor, dir, idx);
+        const b = firstAtOrAfter(list, c.time);
+        if (b < 0) continue;
+        const reachable = net.reachCount(corridor, dir, idx);
+        const covered = new Set();
+        for (let bi = b; bi < list.length && covered.size < reachable; bi++) {
+          const { run, pos, dep } = list[bi];
+          const gapAdd = afterTransfer ? dep - c.time : 0;
+          for (let s = pos + 1; s < run.stops.length; s++) {
+            const nidx = run.stops[s][0];
+            if (covered.has(nidx)) continue;
+            covered.add(nidx);
+            this.relaxCost(bestCost, pq, key(stops[nidx], corridor, false), {
+              time: run.stops[s][1], gap: c.gap + gapAdd, count: c.count,
+            });
+          }
         }
       }
       for (const m of net.corridorsAtStation.get(gid) ?? []) {
@@ -449,19 +560,28 @@ export class Router {
       const idx = net.stopIndex(corridor, gid);
       const stops = net.corridors.get(corridor).stopGids;
       for (let dir = 0; dir <= 1; dir++) {
-        const dep = nextDeparture(net.table(corridor, idx, dir), cost.time);
-        if (dep < 0) continue;
-        const gapAdd = afterTransfer ? dep - cost.time : 0;
-        const step = net.stepOf(corridor, dir);
-        for (let nidx = idx + step; nidx >= 0 && nidx < stops.length; nidx += step) {
-          const arrive = dep + net.elapsedSec(corridor, idx, nidx, this.runSec);
-          const nc = { time: arrive, gap: cost.gap + gapAdd, count: cost.count };
-          if (!eq(key(stops[nidx], corridor, false), nc)) continue;
-          path.push({ type: TYPE_RIDE, fromGid: gid, corridorId: corridor, dir, toGid: stops[nidx], departSec: dep, arriveSec: arrive });
-          walk(stops[nidx], corridor, false, nc, path);
-          path.pop();
+        const list = net.boardings(corridor, dir, idx);
+        const b = firstAtOrAfter(list, cost.time);
+        if (b < 0) continue;
+        const reachable = net.reachCount(corridor, dir, idx);
+        const covered = new Set();
+        for (let bi = b; bi < list.length && covered.size < reachable; bi++) {
+          const { run, pos, dep } = list[bi];
+          const gapAdd = afterTransfer ? dep - cost.time : 0;
+          for (let s = pos + 1; s < run.stops.length; s++) {
+            const nidx = run.stops[s][0];
+            if (covered.has(nidx)) continue;
+            covered.add(nidx);
+            const arrive = run.stops[s][1];
+            const nc = { time: arrive, gap: cost.gap + gapAdd, count: cost.count };
+            if (!eq(key(stops[nidx], corridor, false), nc)) continue;
+            path.push({ type: TYPE_RIDE, fromGid: gid, corridorId: corridor, dir, toGid: stops[nidx], run, fromPos: pos, toPos: s, departSec: dep, arriveSec: arrive });
+            walk(stops[nidx], corridor, false, nc, path);
+            path.pop();
+          }
         }
-      }      for (const m of net.corridorsAtStation.get(gid) ?? []) {
+      }
+      for (const m of net.corridorsAtStation.get(gid) ?? []) {
         if (m === corridor) continue;
         const nc = { time: cost.time + this.transferSec, gap: cost.gap, count: cost.count + 1 };
         if (!eq(key(gid, m, true), nc)) continue;
@@ -527,60 +647,45 @@ export class Router {
 
   /**
    * 把路径还原成方案。
-   * mergeSameLine 为真时把同线同向的连续乘车并成一段（仅多方案枚举用；
-   * 单方案路径保持与原版一致，以便与 Java 版逐字对拍）。
+   * mergeSameLine 为真时把同一列车的连续乘车并成一段（仅多方案枚举用；
+   * 单方案路径保持与 Java 版一致，以便逐字对拍）。
    */
   buildPlan(chain, startSec, arriveSec, mergeSameLine = false) {
     const plan = { startSec, boardSec: -1, arriveSec, rows: [] };
-    let lastArrive = -1;
     for (const e of chain) {
       if (e.type === TYPE_TRANSFER) {
         plan.rows.push({ transfer: true, gid: e.fromGid, platformSec: e.arriveSec });
       } else if (e.type === TYPE_RIDE) {
         const last = plan.rows[plan.rows.length - 1];
-        const sameLine = last && !last.transfer && last.corridorId === e.corridorId && last.dir === e.dir;
-        if (sameLine && (mergeSameLine || lastArrive === e.departSec)) {
+        // 同一列车继续乘坐（枚举会把一段车拆成多步）
+        if (last && last.run === e.run && last.toPos === e.fromPos && (mergeSameLine || last.boardSec === e.run.stops[e.fromPos][1])) {
           this.extendLeg(last, e);
         } else {
           plan.rows.push(this.newLeg(e));
           if (plan.boardSec < 0) plan.boardSec = e.departSec;
         }
-        const lastLeg = plan.rows[plan.rows.length - 1];
-        lastArrive = lastLeg.stopArriveSec[lastLeg.stopArriveSec.length - 1];
       }
     }
     return plan;
   }
 
-  /** 新建一段行程：从上车点到下车点，含中间各站及推算到达时刻 */
+  /** 新建一段行程：取该班车实际停靠的站序与时刻 */
   newLeg(e) {
     const net = this.net;
-    const c = net.corridors.get(e.corridorId);
-    const bIdx = net.stopIndex(e.corridorId, e.fromGid), aIdx = net.stopIndex(e.corridorId, e.toGid);
-    const step = net.stepOf(e.corridorId, e.dir);
-    const stopGids = [c.stopGids[bIdx]], stopArriveSec = [];
-    for (let i = bIdx + step; ; i += step) {
-      stopGids.push(c.stopGids[i]);
-      stopArriveSec.push(e.departSec + net.cumSec(e.corridorId, bIdx, i, this.runSec));
-      if (i === aIdx) break;
-    }
-    return { transfer: false, corridorId: e.corridorId, dir: e.dir, boardSec: e.departSec, stopGids, stopArriveSec };
+    const stopGids = [], stopArriveSec = [];
+    for (let s = e.fromPos; s <= e.toPos; s++) stopGids.push(net.corridors.get(e.corridorId).stopGids[e.run.stops[s][0]]);
+    for (let s = e.fromPos + 1; s <= e.toPos; s++) stopArriveSec.push(e.run.stops[s][1]);
+    return { transfer: false, corridorId: e.corridorId, dir: e.dir, run: e.run, toPos: e.toPos, boardSec: e.departSec, stopGids, stopArriveSec };
   }
 
-  /** 延长一段行程至 e.toGid */
+  /** 延长一段行程至 e.toPos */
   extendLeg(leg, e) {
-    const net = this.net;
-    const c = net.corridors.get(e.corridorId);
-    const step = net.stepOf(e.corridorId, e.dir);
-    const curIdx = net.stopIndex(e.corridorId, leg.stopGids[leg.stopGids.length - 1]);
-    const aIdx = net.stopIndex(e.corridorId, e.toGid);
-    const anchor = curIdx;
-    const base = e.departSec;
-    for (let i = curIdx + step; ; i += step) {
-      leg.stopGids.push(c.stopGids[i]);
-      leg.stopArriveSec.push(base + net.cumSec(e.corridorId, anchor, i, this.runSec));
-      if (i === aIdx) break;
+    const c = this.net.corridors.get(e.corridorId);
+    for (let s = e.fromPos + 1; s <= e.toPos; s++) {
+      leg.stopGids.push(c.stopGids[e.run.stops[s][0]]);
+      leg.stopArriveSec.push(e.run.stops[s][1]);
     }
+    leg.toPos = e.toPos;
   }
 }
 

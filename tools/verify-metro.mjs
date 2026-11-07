@@ -37,7 +37,7 @@ for (const [from, to] of pairs) {
 }
 QUERIES.push({ from: '木渎', to: '桑田岛', depart: '05:10', weekday: 1 });
 QUERIES.push({ from: '木渎', to: '桑田岛', arrive: '00:30', weekday: 7 });
-QUERIES.push({ from: '木渎', to: '桑田岛', depart: '08:30', weekday: 5, runMin: 2.5, transferMin: 8 });
+QUERIES.push({ from: '木渎', to: '桑田岛', depart: '08:30', weekday: 5, transferMin: 8 });
 QUERIES.push({ from: '花桥', to: '木渎', depart: '22:40', weekday: 6 });
 
 const sec = (s) => {
@@ -50,27 +50,26 @@ for (const q of QUERIES) {
   const args = ['route', '--from', q.from, '--to', q.to,
     '--cache-dir', join(javaDir, 'temp', 'cache'), '--weekday', String(q.weekday ?? 3)];
   if (q.depart) args.push('--depart', q.depart); else args.push('--arrive', q.arrive);
-  if (q.runMin) args.push('--run-min', String(q.runMin));
   if (q.transferMin) args.push('--transfer-min', String(q.transferMin));
 
   const javaOut = execFileSync('java', ['-cp', join(javaDir, 'temp', 'classes'), 'szmetro.Main', ...args],
     { cwd: javaDir, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).replace(/\r\n/g, '\n').trimEnd();
 
   const weekday = q.weekday ?? 3;
-  const runMin = q.runMin ?? 2.0, transferMin = q.transferMin ?? 5.0;
+  const transferMin = q.transferMin ?? 5.0;
   const net = netFor(weekday);
-  const router = new Router(net, Math.round(runMin * 60), Math.round(transferMin * 60));
+  const router = new Router(net, Math.round(transferMin * 60));
   const from = net.gid(q.from), to = net.gid(q.to);
   const plan = from === null || to === null ? null
     : q.depart ? router.routeDepart(from, to, sec(q.depart)) : router.routeArrive(from, to, sec(q.arrive));
   const jsOut = renderText(net, plan, {
-    from: q.from, to: q.to, weekday, runMin, transferMin,
+    from: q.from, to: q.to, weekday, transferMin,
     departSec: q.depart ? sec(q.depart) : null, arriveSec: q.arrive ? sec(q.arrive) : null,
   });
 
   if (javaOut === jsOut) {
     pass++;
-    console.log(`OK   ${q.from}→${q.to} ${q.depart ?? q.arrive} w${weekday}${q.runMin ? ` run${q.runMin}` : ''}${q.transferMin ? ` xfer${q.transferMin}` : ''}`);
+    console.log(`OK   ${q.from}→${q.to} ${q.depart ?? q.arrive} w${weekday}${q.transferMin ? ` xfer${q.transferMin}` : ''}`);
   } else {
     fail++;
     console.log(`FAIL ${q.from}→${q.to} ${q.depart ?? q.arrive} w${weekday}`);

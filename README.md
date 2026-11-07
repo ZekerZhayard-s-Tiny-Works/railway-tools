@@ -2,7 +2,7 @@
 
 两个在浏览器里本地运行的车次/换乘查询工具，无需后端、无第三方脚本：
 
-- **`metro/` 苏州地铁路由查询** —— 给定出发车站与出发（或到达）时刻，用时间相关 Dijkstra 求时间最短的乘车方案与换乘点，并列出**全部并列最快**的方案。
+- **`metro/` 苏州地铁路由查询** —— 给定出发车站与出发（或到达）时刻，用时间相关 Dijkstra 求时间最短的乘车方案与换乘点，并列出**全部并列最快**的方案。载入时由逐站时刻表重建列车运行图，按「能上这列车、能在这站下」展开，正确处理大小交路、大站快车跳站与终点站到达时刻。
 - **`transfer/` 全国铁路中转换乘查询** —— 在全国铁路车次中搜索换乘方案，支持按出发或到达时刻查询，并可用车站坐标把邻近车站作为接驳段。
 
 首页 `index.html` 是两个工具的入口。整个目录就是一个可直接发布到 GitHub Pages 的静态站点。
@@ -13,9 +13,9 @@
 index.html  style.css  suggest.js        首页与共用样式、站名补全
 metro/
   index.html  app.js                     页面与交互
-  engine.js                              Network / Router（由 timetable 的 Java 代码移植）
+  engine.js                              Network / Router（由 timetable 的 Java 代码移植，含列车运行图重建）
   render.js                              文本输出渲染（与 Java 命令行版逐字一致）
-  data/network.json                      走廊、车站、官网站对时间
+  data/network.json                      走廊、车站、官网站对时间（仅相邻站对用于路由）
   data/tt_w1..w7.json                    各星期逐站发车时刻表
 transfer/
   index.html  app.js
@@ -29,7 +29,7 @@ tools/
   verify-metro.mjs verify-transfer.mjs   与 Java 版逐字符对拍
   verify-transfer-data.mjs               路路通数据自检（规模阈值 + 样本查询）
   verify-metro-live.mjs                  逐站核对缓存时刻表与网站实时页面是否一致
-.github/workflows/update-metro.yml       每周自动抓取苏州地铁、校验并部署
+.github/workflows/update-metro.yml       每天自动抓取苏州地铁、校验并部署
 .github/workflows/update-transfer.yml    每天自动更新全国铁路数据、校验并部署
 .github/workflows/deploy.yml             代码改动推送后自动部署
 ```
@@ -38,16 +38,16 @@ tools/
 
 站点数据是**构建时的快照**：浏览器受同源与混合内容限制，无法在运行时抓取这两个 HTTP 数据源。
 
-**苏州地铁**（源站 `http://106.14.198.252:8512`）：由 `.github/workflows/update-metro.yml` 每周自动执行，无需本机参与。仓库内的 `timetable/` 是抓取程序源码，工作流会依次：
+**苏州地铁**（源站 `http://106.14.198.252:8512`）：由 `.github/workflows/update-metro.yml` 每天自动执行，无需本机参与。仓库内的 `timetable/` 是抓取程序源码，工作流会依次：
 
 1. 把 `timetable/official/` 里的官网站对时间快照预置到缓存，再抓取 7 个星期的时刻表（约 20~50 分钟，取决于 runner 到源站的网络）；
 2. `node tools/build-metro-data.mjs --min-stops 264 --min-departures 80000` 重建 `metro/data`，站次或班次低于阈值即判为抓取异常、不写文件；
 3. `node tools/verify-metro.mjs` 与 Java 版对拍，必须 20 通过 0 失败；
 4. 有变化才提交 `metro/data`，最后把站点作为 Pages 工件部署。
 
-定时为 UTC `0 0 * * 1`，即北京时间每周一 08:00；也可在 Actions 页面手动 `Run workflow` 触发。GitHub 的定时任务可能延迟数分钟到数十分钟。
+定时为 UTC `0 0 * * *`，即北京时间每天 08:00；也可在 Actions 页面手动 `Run workflow` 触发。GitHub 的定时任务可能延迟数分钟到数十分钟。
 
-**关于官网站对时间**：站间运行时长来自苏州地铁官网，该站对境外 IP 返回 403，GitHub runner 无法抓取，因此时刻表每周实时更新、站对时间使用仓库内快照 `timetable/official/`（随线路调整才需要变）。要更新快照，在本机执行：
+**关于官网站对时间**：站间运行时长来自苏州地铁官网，该站对境外 IP 返回 403，GitHub runner 无法抓取，因此时刻表每天实时更新、站对时间使用仓库内快照 `timetable/official/`（随线路调整才需要变）。站点数据里虽然保存了全部站对，但 **只有相邻站对** 会被路由使用：官网接口给的是全网最短时间（换乘 +5 分钟计），远距离站对可能按别的线路算（例：「索山桥西→金厍桥」3 号线 12 段却返回 18 分钟，实际是 5 号线 9 段的路由）。要更新快照，在本机执行：
 
 ```bash
 cd timetable && ./build.sh && ./run.sh crawl --all-weekdays --refresh
@@ -108,7 +108,7 @@ node tools/verify-transfer-data.mjs
 
 GitHub Pages，源为 **GitHub Actions**：
 
-- `.github/workflows/update-metro.yml`：每周抓取苏州地铁后部署；
+- `.github/workflows/update-metro.yml`：每天抓取苏州地铁后部署；
 - `.github/workflows/update-transfer.yml`：每天更新全国铁路数据后部署；
 - `.github/workflows/deploy.yml`：代码或页面改动推送到 `main` 后自动部署（机器人令牌提交的数据变更不会触发它，由前两个工作流自行部署）。
 

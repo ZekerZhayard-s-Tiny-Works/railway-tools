@@ -110,11 +110,10 @@ async function run() {
   const from = $('from').value, to = $('to').value;
   const weekday = +$('weekday').value;
   const mode = document.querySelector('input[name="mode"]:checked').value;
-  const runMin = +$('runMin').value, transferMin = +$('transferMin').value;
+  const transferMin = +$('transferMin').value;
   let timeSec;
   try {
     timeSec = parseTime($('time').value);
-    if (!(runMin > 0 && runMin <= 30)) throw new Error('站间运行应在 (0, 30] 之间');
     if (!(transferMin >= 0 && transferMin <= 60)) throw new Error('换乘耗时应在 [0, 60] 之间');
   } catch (e) {
     st.className = 'status err';
@@ -129,8 +128,8 @@ async function run() {
     if (f === null) return fail(`未找到车站「${from}」`, net.suggest(from));
     if (t === null) return fail(`未找到车站「${to}」`, net.suggest(to));
 
-    const router = new Router(net, Math.round(runMin * 60), Math.round(transferMin * 60));
-    const opts = { from, to, weekday, runMin, transferMin, departSec: null, arriveSec: null };
+    const router = new Router(net, Math.round(transferMin * 60));
+    const opts = { from, to, weekday, transferMin, departSec: null, arriveSec: null };
     let plans;
     if (mode === 'depart') { opts.departSec = timeSec; plans = router.routeDepartAll(f, t, timeSec); }
     else { opts.arriveSec = timeSec; plans = router.routeArriveAll(f, t, timeSec); }

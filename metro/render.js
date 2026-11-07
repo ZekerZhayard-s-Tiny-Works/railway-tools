@@ -4,9 +4,9 @@ import { planStats, corridorName, formatTime } from './engine.js';
 export const DATA_SOURCE = 'http://106.14.198.252:8512';
 const WEEKDAY_CHARS = '一二三四五六日';
 
-/** opts: {from, to, weekday, departSec?, arriveSec?, runMin, transferMin} */
+/** opts: {from, to, weekday, departSec?, arriveSec?, transferMin} */
 export function renderText(net, plan, opts) {
-  const { from, to, weekday, runMin, transferMin } = opts;
+  const { from, to, weekday, transferMin } = opts;
   const wdName = `周${WEEKDAY_CHARS[weekday - 1]}`;
   const out = [];
   const sep = (ch) => ch + ch.repeat(28);
@@ -14,8 +14,8 @@ export function renderText(net, plan, opts) {
   out.push(sep('＝'));
   const mode = opts.departSec != null ? '后出发' : '前到达';
   const when = formatTime(opts.departSec != null ? opts.departSec : opts.arriveSec);
-  out.push(`查询: ${from} → ${to}（${wdName} ${when} ${mode}，站间 ${runMin.toFixed(1)} 分钟 / 换乘 ${transferMin.toFixed(0)} 分钟）`);
-  out.push(`（时刻表: ${DATA_SOURCE} ；站间运行与换乘时间为估计参数，`);
+  out.push(`查询: ${from} → ${to}（${wdName} ${when} ${mode}，换乘 ${transferMin.toFixed(0)} 分钟）`);
+  out.push(`（时刻表: ${DATA_SOURCE} ；行车时刻取自时刻表，换乘耗时为估计参数，`);
   out.push('  多条可行经由时按 时间 → 换乘候车余量合计最长 → 换乘次数最少 取舍，结果仅供参考）');
   const name = (gid) => net.nameOfGid[gid];
   if (plan === null) {
