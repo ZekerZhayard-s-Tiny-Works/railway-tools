@@ -423,10 +423,11 @@ export class Router {
       }
     }
 
+    // 代价完全并列时取状态键较小者，保证 JS/Java 遍历顺序不同也能选出同一条
     let bestKey = -1, bestC = null;
     for (const [kk, cc] of bestCost) {
       if (decodeKey(kk).gid !== toGid) continue;
-      if (bestC === null || cmpCost(cc, bestC) < 0) { bestC = cc; bestKey = kk; }
+      if (bestC === null || cmpCost(cc, bestC) < 0 || (cmpCost(cc, bestC) === 0 && kk < bestKey)) { bestC = cc; bestKey = kk; }
     }
     if (bestKey < 0) return null;
 
@@ -530,12 +531,11 @@ export class Router {
   enumerate(fromGid, toGid, startSec, minArrive, bestCost, out) {
     const net = this.net;
     const seen = new Set();
-    const eq = (k, cost) => {
-      const b = bestCost.get(k);
-      return b !== undefined && cmpCost(b, cost) === 0;
-    };
+    // 紧边只看到达时刻：等时但换乘点/换乘次数不同的经由也要列出（重复经由由 dedupePlans 去重）
+    const eq = (k, cost) => bestCost.get(k)?.time === cost.time;
 
-    const walk = (gid, corridor, afterTransfer, cost, path) => {
+    // ridden：是否已乘过车。起点站可直选任一走廊，未乘车时再"换乘"只会产生伪方案
+    const walk = (gid, corridor, afterTransfer, cost, path, ridden) => {
       if (gid === toGid && cost.time === minArrive) {
         out.push({ path: [...path], cost: { ...cost } });
         return;
@@ -551,7 +551,7 @@ export class Router {
           const nc = { time: cost.time, gap: cost.gap, count: cost.count };
           if (!eq(key(gid, l, false), nc)) continue;
           path.push({ type: TYPE_START, fromGid: gid, corridorId: l, dir: -1, toGid: gid, departSec: cost.time, arriveSec: cost.time });
-          walk(gid, l, false, nc, path);
+          walk(gid, l, false, nc, path, false);
           path.pop();
         }
         return;
@@ -576,22 +576,23 @@ export class Router {
             const nc = { time: arrive, gap: cost.gap + gapAdd, count: cost.count };
             if (!eq(key(stops[nidx], corridor, false), nc)) continue;
             path.push({ type: TYPE_RIDE, fromGid: gid, corridorId: corridor, dir, toGid: stops[nidx], run, fromPos: pos, toPos: s, departSec: dep, arriveSec: arrive });
-            walk(stops[nidx], corridor, false, nc, path);
+            walk(stops[nidx], corridor, false, nc, path, true);
             path.pop();
           }
         }
       }
+      if (!ridden) return;   // 起点未乘车即可选任一走廊，此时"换乘"只会生成伪方案
       for (const m of net.corridorsAtStation.get(gid) ?? []) {
         if (m === corridor) continue;
         const nc = { time: cost.time + this.transferSec, gap: cost.gap, count: cost.count + 1 };
         if (!eq(key(gid, m, true), nc)) continue;
         path.push({ type: TYPE_TRANSFER, fromGid: gid, corridorId: m, dir: -1, toGid: gid, departSec: cost.time, arriveSec: nc.time });
-        walk(gid, m, true, nc, path);
+        walk(gid, m, true, nc, path, true);
         path.pop();
       }
     };
 
-    walk(fromGid, START, false, { time: startSec, gap: 0, count: 0 }, []);
+    walk(fromGid, START, false, { time: startSec, gap: 0, count: 0 }, [], false);
   }
 
   /** 给定到达时限，返回"最晚出发仍不迟到"的方案；无法按时到达返回 null（与 Java 版一致） */
@@ -710,12 +711,14 @@ function dedupePlans(plans) {
 
 /** 方案统计：换乘次数、换乘候车余量合计、经由站数 */
 export function planStats(plan, transferSec) {
-  let transfers = 0, gap = 0, stops = 0, prevArrive = -1;
+  let transfers = 0, gap = 0, stops = 0, prevArrive = -1, prevCorridor = -1;
   for (const row of plan.rows) {
     if (row.transfer) { transfers++; continue; }
     stops += row.stopGids.length - 1;
-    if (prevArrive >= 0) gap += (row.boardSec - prevArrive) - transferSec;
+    // 同走廊换车（短交路续乘）没有走行时间，候车不扣 transferSec
+    if (prevArrive >= 0) gap += (row.boardSec - prevArrive) - (row.corridorId === prevCorridor ? 0 : transferSec);
     prevArrive = row.stopArriveSec[row.stopArriveSec.length - 1];
+    prevCorridor = row.corridorId;
   }
   return { transfers, gap, stops };
 }

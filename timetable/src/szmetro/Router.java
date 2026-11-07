@@ -83,11 +83,13 @@ public final class Router {
 
         /** 换乘候车余量合计：各次换乘走上站台后到发车的候车时间之和（走行时间固定，不计入） */
         public int transferWaitSec(int transferSec) {
-            int gap = 0, prevArrive = -1;
+            int gap = 0, prevArrive = -1, prevCorridor = -1;
             for (Object row : rows) {
                 if (row instanceof Leg leg) {
-                    if (prevArrive >= 0) gap += (leg.boardSec - prevArrive) - transferSec;
+                    // 同走廊换车（短交路续乘）没有走行时间，候车不扣 transferSec
+                    if (prevArrive >= 0) gap += (leg.boardSec - prevArrive) - (leg.corridorId == prevCorridor ? 0 : transferSec);
                     prevArrive = leg.stopArriveSec.get(leg.stopArriveSec.size() - 1);
+                    prevCorridor = leg.corridorId;
                 }
             }
             return gap;
@@ -208,11 +210,13 @@ public final class Router {
             }
         }
 
+        // 代价完全并列时取状态键较小者，保证遍历顺序不同也能选出同一条（与 JS 一致）
         long bestKey = -1;
         Cost bestCost = null;
         for (var e : best.entrySet()) {
             if ((int) (e.getKey() >> 7) != toGid) continue;
-            if (bestCost == null || e.getValue().compareTo(bestCost) < 0) {
+            int c = bestCost == null ? -1 : e.getValue().compareTo(bestCost);
+            if (bestCost == null || c < 0 || (c == 0 && e.getKey() < bestKey)) {
                 bestCost = e.getValue();
                 bestKey = e.getKey();
             }
