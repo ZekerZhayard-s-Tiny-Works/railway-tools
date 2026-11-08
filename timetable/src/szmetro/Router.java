@@ -153,8 +153,8 @@ public final class Router {
         }
     }
 
-    /** 给定最早出发时刻，返回按字典序最优的方案；不可达返回 null */
-    public Plan routeDepart(int fromGid, int toGid, int startSec) {
+    /** 给定最早出发时刻，返回最早到达的方案（内部实现；对外见 routeDepart） */
+    public Plan fastestFrom(int fromGid, int toGid, int startSec) {
         if (fromGid == toGid) return new Plan(startSec, startSec, startSec);
 
         Map<Long, Cost> best = new HashMap<>();
@@ -239,6 +239,18 @@ public final class Router {
         return buildPlan(parent, bestKey, startSec, bestCost.time);
     }
 
+    /**
+     * 给定最早出发时刻，返回最早到达的方案；并列最早到达时取最晚出发的方案
+     * （同样能最早到达就不必更早到站台，尽量少等车）。
+     */
+    public Plan routeDepart(int fromGid, int toGid, int startSec) {
+        Plan plan = fastestFrom(fromGid, toGid, startSec);
+        if (plan == null || fromGid == toGid) return plan;
+        // 在保证同一到达时刻 A* 的前提下求最晚出发：等价于「以 A* 为期限求最晚出发」
+        Plan q = routeArrive(fromGid, toGid, plan.arriveSec);
+        return q != null ? q : plan;
+    }
+
     /** 给定到达时限，返回"最晚出发仍不迟到"的方案；无法按时到达返回 null */
     public Plan routeArrive(int fromGid, int toGid, int deadlineSec) {
         TreeSet<Integer> cands = new TreeSet<>();
@@ -250,14 +262,14 @@ public final class Router {
         if (cands.isEmpty()) return null;
         List<Integer> cs = new ArrayList<>(cands);
 
-        Plan first = routeDepart(fromGid, toGid, cs.get(0));
+        Plan first = fastestFrom(fromGid, toGid, cs.get(0));
         if (first == null || first.arriveSec > deadlineSec) return null;
 
         Plan bestPlan = first;
         int lo = 0, hi = cs.size() - 1;
         while (lo <= hi) {
             int mid = (lo + hi) >>> 1;
-            Plan p = routeDepart(fromGid, toGid, cs.get(mid));
+            Plan p = fastestFrom(fromGid, toGid, cs.get(mid));
             if (p != null && p.arriveSec <= deadlineSec) {
                 bestPlan = p;
                 lo = mid + 1;

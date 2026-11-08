@@ -485,8 +485,8 @@ export class Router {
     this.transferSec = transferSec;
   }
 
-  /** 给定最早出发时刻，返回最优方案；不可达返回 null（与 Java 版逐字一致） */
-  routeDepart(fromGid, toGid, startSec) {
+  /** 给定最早出发时刻，返回最早到达的方案（内部实现；对外见 routeDepart） */
+  fastestFrom(fromGid, toGid, startSec) {
     const net = this.net;
     if (fromGid === toGid) return { startSec, boardSec: startSec, arriveSec: startSec, rows: [] };
 
@@ -641,7 +641,11 @@ export class Router {
     const out = [];
     this.enumerate(fromGid, toGid, startSec, minArrive, bestCost, out);
     out.sort((a, b) => cmpCost(a.cost, b.cost));
-    return dedupePlans(out.map((x) => this.buildPlan(x.path, startSec, minArrive, true)));
+    const plans = dedupePlans(out.map((x) => this.buildPlan(x.path, startSec, minArrive, true)));
+    // 并列最早到达时只保留最晚出发的方案（同一时刻到达，不必更早到站台）
+    let latestBoard = -1;
+    for (const p of plans) if (p.boardSec > latestBoard) latestBoard = p.boardSec;
+    return plans.filter((p) => p.boardSec === latestBoard);
   }
 
   relaxCost(best, pq, k, cost) {
@@ -728,6 +732,17 @@ export class Router {
     walk(fromGid, START, false, { time: startSec, gap: 0, count: 0 }, [], false);
   }
 
+  /**
+   * 给定最早出发时刻，返回最早到达的方案；并列最早到达时取最晚出发的方案
+   * （同样能最早到达就不必更早到站台，尽量少等车）。
+   */
+  routeDepart(fromGid, toGid, startSec) {
+    const plan = this.fastestFrom(fromGid, toGid, startSec);
+    if (!plan || fromGid === toGid) return plan;
+    // 在保证同一到达时刻 A* 的前提下求最晚出发：等价于「以 A* 为期限求最晚出发」
+    return this.routeArrive(fromGid, toGid, plan.arriveSec) ?? plan;
+  }
+
   /** 给定到达时限，返回"最晚出发仍不迟到"的方案；无法按时到达返回 null（与 Java 版一致） */
   routeArrive(fromGid, toGid, deadlineSec) {
     const net = this.net;
@@ -739,14 +754,14 @@ export class Router {
     if (cands.size === 0) return null;
     const cs = [...cands].sort((a, b) => a - b);
 
-    const first = this.routeDepart(fromGid, toGid, cs[0]);
+    const first = this.fastestFrom(fromGid, toGid, cs[0]);
     if (first === null || first.arriveSec > deadlineSec) return null;
 
     let bestPlan = first;
     let lo = 0, hi = cs.length - 1;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
-      const p = this.routeDepart(fromGid, toGid, cs[mid]);
+      const p = this.fastestFrom(fromGid, toGid, cs[mid]);
       if (p !== null && p.arriveSec <= deadlineSec) { bestPlan = p; lo = mid + 1; } else { hi = mid - 1; }
     }
     return bestPlan;
@@ -767,7 +782,7 @@ export class Router {
     let lo = 0, hi = cs.length - 1, latest = -1;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
-      const plan = this.routeDepart(fromGid, toGid, cs[mid]);
+      const plan = this.fastestFrom(fromGid, toGid, cs[mid]);
       if (plan !== null && plan.arriveSec <= deadlineSec) { latest = mid; lo = mid + 1; } else { hi = mid - 1; }
     }
     if (latest < 0) return [];
