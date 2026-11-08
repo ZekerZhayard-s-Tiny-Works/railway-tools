@@ -108,11 +108,9 @@ for (const w of weeks) {
 const operations = { corridors: {}, through: [] };
 const opsFile = join(cacheDir, 'operations.txt');
 if (existsSync(opsFile)) {
-  for (const ln of readFileSync(opsFile, 'utf8').split(/
-?
-/)) {
+  for (const ln of readFileSync(opsFile, 'utf8').split(/\r?\n/)) {
     if (!ln.trim() || ln.startsWith('#')) continue;
-    const p = ln.split('	');
+    const p = ln.split('\t');
     const cor = (cid) => (operations.corridors[cid] ??= {});
     if (p[0] === 'turnback') ((cor(p[1]).turnbacks ??= {})[p[2]] ??= []).push(p[4] === 'fast' ? { at: p[3], fast: true } : p[3]);
     else if (p[0] === 'terminus') ((cor(p[1]).termini ??= {})[p[2]] ??= []).push({ from: p[3], at: p[4] });
