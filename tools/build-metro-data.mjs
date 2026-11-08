@@ -104,5 +104,21 @@ for (const w of weeks) {
   writeFileSync(out, JSON.stringify(w.data));
   console.log(`tt_w${w.weekday}.json  ${w.stops} 站次 / ${w.departures} 班次  ${(readFileSync(out).length / 1024).toFixed(0)} KB`);
 }
-writeFileSync(join(outDir, 'network.json'), JSON.stringify({ snapshot, corridors, stations, labels, officialLines, officialPairs }));
+// 运营配置 operations.txt（折返站/段终点/贯通/相邻站时间覆盖）转为结构化 JSON 一并写入
+const operations = { corridors: {}, through: [] };
+const opsFile = join(cacheDir, 'operations.txt');
+if (existsSync(opsFile)) {
+  for (const ln of readFileSync(opsFile, 'utf8').split(/
+?
+/)) {
+    if (!ln.trim() || ln.startsWith('#')) continue;
+    const p = ln.split('	');
+    const cor = (cid) => (operations.corridors[cid] ??= {});
+    if (p[0] === 'turnback') ((cor(p[1]).turnbacks ??= {})[p[2]] ??= []).push(p[4] === 'fast' ? { at: p[3], fast: true } : p[3]);
+    else if (p[0] === 'terminus') ((cor(p[1]).termini ??= {})[p[2]] ??= []).push({ from: p[3], at: p[4] });
+    else if (p[0] === 'through') operations.through.push({ from: { corridor: Number(p[1]), dir: Number(p[2]) }, at: p[3], to: { corridor: Number(p[4]), dir: Number(p[5]) } });
+    else if (p[0] === 'hop') ((cor(p[1]).hops ??= {})[p[2]] ??= {})[`${p[3]}→${p[4]}`] = Number(p[5]);
+  }
+}
+writeFileSync(join(outDir, 'network.json'), JSON.stringify({ snapshot, corridors, stations, labels, officialLines, officialPairs, operations }));
 console.log(`network.json  ${corridors.length} 走廊 / ${stations.length} 站 / ${officialPairs.length} 官网站对  ${(readFileSync(join(outDir, 'network.json')).length / 1024).toFixed(0)} KB  快照 ${snapshot}`);

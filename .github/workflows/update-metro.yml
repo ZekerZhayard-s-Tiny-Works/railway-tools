@@ -48,7 +48,7 @@ jobs:
       - name: 预置官网站对时间快照
         run: |
           mkdir -p timetable/temp/cache
-          cp timetable/official/official_lines.txt timetable/official/official_pairs.txt timetable/temp/cache/
+          cp timetable/official/official_lines.txt timetable/official/official_pairs.txt timetable/official/operations.txt timetable/temp/cache/
 
       - name: 抓取全部星期的时刻表
         working-directory: timetable

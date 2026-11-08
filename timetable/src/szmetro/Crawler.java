@@ -225,9 +225,13 @@ public final class Crawler {
     private static int[] parseMinutes(String html) {
         TreeSet<Integer> secs = new TreeSet<>();
         Matcher rm = TAB_ROW.matcher(html);
+        int lastHour = -1;
         while (rm.find()) {
             int hour = Integer.parseInt(rm.group(1));
             if (hour < 0 || hour > 47) continue;
+            // 跨零点的末班车在页面里以「0 时」块排在 23 时之后，按 24+ 小时记
+            if (hour < lastHour) hour += 24;
+            lastHour = hour;
             Matcher tm = TOKEN.matcher(rm.group(2));
             while (tm.find()) {
                 int v = Integer.parseInt(tm.group());

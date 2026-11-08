@@ -16,6 +16,7 @@ export class Network {
     this.boardAt = new Map();            // "cid|dir|idx" -> [{dep, run, pos}]（升序）
     this.reachAt = new Map();            // "cid|dir|idx" -> 该方向上可达下游站数
     this.tables = new Map();             // "cid|idx" -> [方向0秒[], 方向1秒[]]
+    this.ops = {};                       // 运营配置（折返站/段终点/贯通关系）
   }
 
   static load(raw, weekTables) {
@@ -52,6 +53,17 @@ export class Network {
     }
     for (const at of n.corridorsAtStation.values()) at.sort((a, b) => a - b);
 
+    // 站点页把跨零点的末班车放在「0 时」块（排在 23 时之后）；解析后按 0:xx 记录，
+    // 载入时统一归入次日（4:00 前不可能是正常首班车），避免与清晨时刻混淆
+    for (const dirs of Object.values(weekTables)) {
+      for (let d = 0; d < 2; d++) {
+        const arr = dirs[d];
+        if (!arr) continue;
+        let changed = false;
+        for (let i = 0; i < arr.length; i++) if (arr[i] < 4 * 3600) { arr[i] += 86400; changed = true; }
+        if (changed) arr.sort((a, b) => a - b);
+      }
+    }
     n.tables = new Map(Object.entries(weekTables));
 
     // 方向标签（往某站）取自时刻表；校验其必须是走廊端点，防止站序或标签错乱
@@ -138,6 +150,7 @@ export class Network {
       }
       n.pairMatrix.set(cid, mat);
     }
+    n.ops = raw.operations ?? {};
     n.buildRuns();
     return n;
   }
@@ -146,13 +159,20 @@ export class Network {
    * 由逐站时刻表重建列车运行图。
    * 站点页只列停靠时刻（大站快车跳过的站没有），终点站（含小交路终到站）不记到达时刻，
    * 因此：
-   *   - 相邻站按「无越行」顺序配对，hop 取官网相邻时间（不准时才用相互关推算）；
+   *   - 相邻站按「无越行」顺序配对：到达不得早于本站发车 + 站间运行时间（hop 取官网站对，
+   *     不准时用时刻表相互关推算）；大站快车跳过的站按多站补链（最远 MAX_SKIP 站）；
    *   - 配对率过低（<80%）视为运营分界（如 6 号线南斜步：两段小交路不贯通），不跨段串联；
-   *   - 未配上的车视为到前方最近站终到，到达时刻 = 末次发车 + hop。
+   *   - 终到：折返站（运营配置）直接终到；段终点（运营配置）前因站点页数据缺失断链的，
+   *     按 hop 链延伸到段终点（快车只记终点、普通车逐站推算）；其余推算到下一站；
+   *   - 跨走廊贯通（运营配置）：A 线到贯通站终到的列车，若 B 线同方向下一站有发车时刻吻合
+   *     的列车，为该车补上贯通站停靠（如 7 号线支线车在红庄续行 4 号线）。
    */
   buildRuns() {
-    const TOL = 60;        // 时刻配对容差（秒）
+    const TOL = 60;        // 时刻配对容差（秒）：到达最多晚 1 分钟，不允许早于运行时间到达
     const MIN_RATE = 0.8;  // 配对率下限，低于此判为运营分界
+    const MAX_SKIP = 6;    // 大站快车补链最大跨站数
+    const DWELL = 60;      // 被跳过站的停站时间估计（秒）
+    const SKIP_TOL = 120;  // 跨站补链容差（秒）：快车运行时刻数据噪声较大
     const match = (a, b, hop, tol = TOL) => {
       const pairs = [];
       let i = 0, j = 0;
@@ -174,9 +194,12 @@ export class Network {
       }
       return best > 0 ? best : 120;
     };
+    const ops = this.ops ?? {};
+    const hopOf = new Map();
 
     for (const [cid, c] of this.corridors) {
       const N = c.stopGids.length, mat = this.pairMatrix.get(cid);
+      const coff = ops.corridors?.[cid] ?? {};
 
       for (let dir = 0; dir <= 1; dir++) {
         const order = [];
@@ -184,6 +207,14 @@ export class Network {
         const deps = order.map((i) => this.table(cid, i, dir));
         const hop = [];
         for (let p = 0; p < N - 1; p++) hop.push(pickHop(deps[p], deps[p + 1], mat[order[p]][order[p + 1]]));
+        // 运营配置可显式指定相邻站运行时间（官网站对相邻值有 ±1 分钟噪声，可用长站对校准）
+        const hopFix = coff.hops?.[dir] ?? {};
+        for (const [edge, min] of Object.entries(hopFix)) {
+          const [a, b] = edge.split('→');
+          const pa = order.indexOf(c.stopNames.indexOf(a)), pb = order.indexOf(c.stopNames.indexOf(b));
+          if (pa >= 0 && pb === pa + 1) hop[pa] = min * 60;
+        }
+        hopOf.set(`${cid}|${dir}`, hop);
 
         const next = new Map(), prev = new Map();
         const boundary = [];
@@ -199,18 +230,22 @@ export class Network {
             prev.set(`${p + 1}|${j}`, `${p}|${i}`);
           }
         }
-        // 跳站补链：本站有车、下一站无，但下下站时刻吻合（大站快车）
-        for (let p = 0; p + 2 < N; p++) {
-          if (boundary[p] || boundary[p + 1]) continue;
-          for (let i = 0; i < deps[p].length; i++) {
-            if (next.has(`${p}|${i}`)) continue;
-            const expect = deps[p][i] + hop[p] + hop[p + 1];
-            for (let j = 0; j < deps[p + 2].length; j++) {
-              if (prev.has(`${p + 2}|${j}`)) continue;
-              if (Math.abs(deps[p + 2][j] - expect) <= TOL) {
-                next.set(`${p}|${i}`, `${p + 2}|${j}`);
-                prev.set(`${p + 2}|${j}`, `${p}|${i}`);
-                break;
+        // 大站快车多站补链：本站有车、下游 k 站时刻吻合，k 优先取小
+        for (let p = 0; p < N; p++) {
+          for (let k = 2; k <= MAX_SKIP && p + k < N; k++) {
+            if (boundary[p + k - 1]) break;
+            for (let i = 0; i < deps[p].length; i++) {
+              if (next.has(`${p}|${i}`)) continue;
+              // 跨站时刻 = 沿途 hop 之和 − 被跳过站的停站时间（约 1 分/站）
+              let expect = deps[p][i] - (k - 1) * DWELL;
+              for (let d = 0; d < k; d++) expect += hop[p + d];
+              for (let j = 0; j < deps[p + k].length; j++) {
+                if (prev.has(`${p + k}|${j}`)) continue;
+                if (Math.abs(deps[p + k][j] - expect) <= SKIP_TOL) {
+                  next.set(`${p}|${i}`, `${p + k}|${j}`);
+                  prev.set(`${p + k}|${j}`, `${p}|${i}`);
+                  break;
+                }
               }
             }
           }
@@ -232,21 +267,95 @@ export class Network {
             runs.push({ stops });
           }
         }
-        // 终到时刻：末次发车 + 至下一站的 hop（终点站/小交路终到站均不记到达时刻）
+        // 终到处理
+        const posOf = (idx) => (dir === 0 ? idx : N - 1 - idx);
+        const idxOf = new Map(c.stopNames.map((n, i) => [n, i]));
+        // 尾段合并（先于终到判定）：推算的下一站到达与自成一列的短链首值接近时并入本列
+        for (const run of runs) {
+          if (run.merged) continue;
+          while (true) {
+            const last = run.stops[run.stops.length - 1];
+            const p = posOf(last[0]);
+            if (p >= N - 1) break;
+            const expect = last[1] + hop[p];
+            const nextIdx = order[p + 1];
+            const frag = runs.find((f) => f !== run && !f.merged && f.stops.length === 1
+              && f.stops[0][0] === nextIdx && Math.abs(f.stops[0][1] - expect) <= SKIP_TOL);
+            if (!frag) break;
+            run.stops.push(...frag.stops);
+            frag.merged = true;
+          }
+        }
+        const turnbacks = (coff.turnbacks?.[dir] ?? [])
+          .map((t) => (typeof t === 'string' ? { at: t } : t))
+          .map((t) => ({ idx: idxOf.get(t.at), fast: !!t.fast }))
+          .filter((t) => t.idx !== undefined);
+        const termini = (coff.termini?.[dir] ?? [])
+          .map((t) => [idxOf.get(t.from), idxOf.get(t.at)])
+          .filter(([a, b]) => a !== undefined && b !== undefined);
         for (const run of runs) {
           const last = run.stops[run.stops.length - 1];
-          const p = dir === 0 ? last[0] : N - 1 - last[0];
+          const fast = run.stops.some((s, i) => i > 0 && s[0] - run.stops[i - 1][0] !== (dir === 0 ? 1 : -1));
+          // 折返站：列车终到于此（带 fast 限定的只对越站快车生效）
+          if (turnbacks.some((t) => t.idx === last[0] && (!t.fast || fast))) continue;
+          let term = -1;
+          for (const [from, at] of termini) {
+            const ps = posOf(run.stops[0][0]), pl = posOf(last[0]);
+            if (ps >= posOf(from) && ps < posOf(at) && pl < posOf(at)) { term = at; break; }
+          }
+          if (term >= 0) {
+            // 段终点前数据缺失（站点页截断）：按 hop 链延伸到段终点；快车中间越站不记
+            let cur = last[0], time = last[1];
+            while (cur !== term) {
+              const p = posOf(cur);
+              time += hop[p];
+              cur = order[p + 1];
+              if (!fast || cur === term) run.stops.push([cur, time]);
+            }
+            continue;
+          }
+          const p = posOf(last[0]);
           if (p < N - 1) run.stops.push([order[p + 1], last[1] + hop[p]]);
         }
 
-        this.runs.set(`${cid}|${dir}`, runs);
-        for (const run of runs) {
-          for (let k = 0; k < run.stops.length - 1; k++) {  // 末站是到达，不能上车
-            const key = `${cid}|${dir}|${run.stops[k][0]}`;
-            let list = this.boardAt.get(key);
-            if (!list) this.boardAt.set(key, (list = []));
-            list.push({ dep: run.stops[k][1], run, pos: k });
-          }
+        this.runs.set(`${cid}|${dir}`, runs.filter((r) => !r.merged));
+      }
+    }
+
+    // 跨走廊贯通接续
+    for (const rel of ops.through ?? []) {
+      const cidA = Number(rel.from.corridor), cidB = Number(rel.to.corridor);
+      const cA = this.corridors.get(cidA), cB = this.corridors.get(cidB);
+      if (!cA || !cB) continue;
+      const atA = cA.stopNames.indexOf(rel.at), atB = cB.stopNames.indexOf(rel.at);
+      if (atA < 0 || atB < 0) continue;
+      const NB = cB.stopGids.length, dirB = rel.to.dir;
+      const orderB = [];
+      for (let p = 0; p < NB; p++) orderB.push(dirB === 0 ? p : NB - 1 - p);
+      const posB = orderB.indexOf(atB);
+      if (posB < 0 || posB >= NB - 1) continue;
+      const nextB = orderB[posB + 1];
+      const hopB = hopOf.get(`${cidB}|${dirB}`)[posB];
+      const runsB = this.runs.get(`${cidB}|${dirB}`) ?? [];
+      for (const run of this.runs.get(`${cidA}|${rel.from.dir}`) ?? []) {
+        const last = run.stops[run.stops.length - 1];
+        if (last[0] !== atA) continue;
+        const want = last[1] + hopB;
+        const cand = runsB.find((r) => r.stops[0][0] === nextB
+          && r.stops[0][1] >= want && r.stops[0][1] <= want + TOL);
+        if (cand) cand.stops.unshift([atB, last[1]]);
+      }
+    }
+
+    // 登记可上车次与可达站数
+    for (const [key, runs] of this.runs) {
+      const [cid, dir] = key.split('|').map(Number);
+      for (const run of runs) {
+        for (let k = 0; k < run.stops.length - 1; k++) {  // 末站是到达，不能上车
+          const bkey = `${cid}|${dir}|${run.stops[k][0]}`;
+          let list = this.boardAt.get(bkey);
+          if (!list) this.boardAt.set(bkey, (list = []));
+          list.push({ dep: run.stops[k][1], run, pos: k });
         }
       }
     }
