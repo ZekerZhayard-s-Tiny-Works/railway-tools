@@ -84,7 +84,7 @@ function renderPlan(net, plans, opts) {
       legHead.className = 'leg-head';
       legHead.innerHTML = `<span class="leg-no">${plans.length > 1 ? `${idx + 1}.${legNo}` : legNo}.</span><span class="badge">${corridorName(c)}</span>`
         + `<span>往${row.dir === 0 ? c.d0Label : c.d1Label}</span>`
-        + `<strong>${formatTime(row.boardSec)}</strong><span>${net.nameOfGid[row.stopGids[0]]} 上车</span>`;
+        + `<strong>${formatTime(row.boardSec)}</strong><span>${net.nameOfGid[row.stopGids[0]]} ${row.through ? '同车续行（不下车）' : '上车'}</span>`;
       leg.appendChild(legHead);
       const stops = document.createElement('div');
       stops.className = 'stops';
