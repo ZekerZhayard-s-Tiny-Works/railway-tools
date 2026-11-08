@@ -38,6 +38,7 @@ public final class Main {
         Integer weekday;
         double transferMin = 5.0;
         boolean refresh, allWeekdays;
+        Integer concurrency;
         Path cacheDir = Path.of("temp", "cache");
     }
 
@@ -63,6 +64,11 @@ public final class Main {
                 }
                 case "--refresh" -> o.refresh = true;
                 case "--all-weekdays" -> o.allWeekdays = true;
+                case "--concurrency" -> {
+                    int n = Integer.parseInt(args[++i]);
+                    if (n < 1 || n > 16) throw new CliError("--concurrency 取值 1..16");
+                    o.concurrency = n;
+                }
                 case "--cache-dir" -> o.cacheDir = Path.of(need(args, ++i, a));
                 case "--help", "-h" -> { printHelp(); return; }
                 default -> throw new CliError("未知参数: " + a + "（--help 查看用法）");
@@ -80,10 +86,11 @@ public final class Main {
                 crawler.ensureOfficialTimes(o.refresh);
                 List<Integer> cids = crawler.readCorridorIds();
                 int[] wds = o.allWeekdays ? new int[]{1, 2, 3, 4, 5, 6, 7} : new int[]{weekday};
+                int conc = o.concurrency != null ? o.concurrency : Crawler.DEFAULT_CONCURRENCY;
                 for (int wd : wds) {
                     System.out.println("== 抓取 星期" + "一二三四五六日".charAt(wd - 1) + " ==");
                     for (int cid : cids) {
-                        int holes = crawler.crawlTimetables(cid, wd, o.refresh);
+                        int holes = crawler.crawlTimetables(cid, wd, o.refresh, conc);
                         System.out.println("走廊 " + cid + "（" + cid + "号线）：完成" +
                                 (holes > 0 ? "，缺口 " + holes + " 站" : ""));
                     }
@@ -112,7 +119,7 @@ public final class Main {
         crawler.ensureOfficialTimes(o.refresh);
         Network net = Network.load(o.cacheDir);
         for (int cid : net.corridors.keySet())
-            crawler.crawlTimetables(cid, weekday, o.refresh);
+            crawler.crawlTimetables(cid, weekday, o.refresh, o.concurrency != null ? o.concurrency : Crawler.DEFAULT_CONCURRENCY);
         net = Network.load(o.cacheDir); // 载入新缓存的时刻表
 
         Integer from = net.gid(o.from), to = net.gid(o.to);
@@ -174,9 +181,10 @@ public final class Main {
                     sb.append(net.nameOfGid.get(leg.stopGids.get(i)));
                     if (i > 0) sb.append(' ').append(fmt(leg.stopArriveSec.get(i - 1)));
                 }
-                System.out.printf("  %d. 乘%s（往%s）%s %s 上车%n  %s%n",
+                System.out.printf("  %d. 乘%s（往%s）%s %s %s%n  %s%n",
                         legNo, c.displayName(), toward, fmt(leg.boardSec),
-                        net.nameOfGid.get(leg.stopGids.get(0)), sb);
+                        net.nameOfGid.get(leg.stopGids.get(0)),
+                        leg.through ? "同车续行（不下车）" : "上车", sb);
                 stopCount += leg.stopGids.size() - 1;
             }
         }
@@ -231,6 +239,7 @@ public final class Main {
                   --transfer-min 数   同名站跨线换乘分钟数（缺省 5）
                   --refresh           强制重新抓取缓存
                   --all-weekdays      crawl 模式抓取周一至周日全部时刻表
+                  --concurrency N     站间并行抓取并发数（1..16，缺省 4）
                   --cache-dir 目录    缓存目录（缺省 temp/cache，所有临时文件均在 ./temp 下）
                 """);
     }

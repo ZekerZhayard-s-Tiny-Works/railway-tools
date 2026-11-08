@@ -16,6 +16,12 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.regex.Matcher;
@@ -47,6 +53,8 @@ public final class Crawler {
     private static final Pattern ACTIVE_DIR = Pattern.compile("box-item-active[^\"]*\"\\s*v-direction=\"(\\d)\"");
 
     private final Path cacheDir;
+    /** 复用的 HttpClient（线程安全）：保持长连接，避免每次请求重新建立 TCP */
+    private final HttpClient client = newClient();
 
     public Crawler(Path cacheDir) {
         this.cacheDir = cacheDir;
@@ -132,82 +140,120 @@ public final class Crawler {
         Files.writeString(staF, sb.toString(), StandardCharsets.UTF_8);
     }
 
+    /** 并行抓取的默认并发数（服务端吞吐约 5~6 次/秒，4 路足够占满） */
+    static final int DEFAULT_CONCURRENCY = 4;
+
     /**
-     * 抓取一条走廊在指定星期、两个方向的全站时刻表。
+     * 抓取一条走廊在指定星期、两个方向的全站时刻表（站间并行，默认并发 4）。
      * 每站先按其归属菜单线路请求，被 302 时回退到同站其他菜单线路。
      * 返回缺口数（两个方向都无数据的站）。
      */
     public int crawlTimetables(int corridorId, int weekday, boolean refresh)
             throws IOException, InterruptedException {
+        return crawlTimetables(corridorId, weekday, refresh, DEFAULT_CONCURRENCY);
+    }
+
+    public int crawlTimetables(int corridorId, int weekday, boolean refresh, int concurrency)
+            throws IOException, InterruptedException {
         List<String[]> stops = readCorridorStops(corridorId); // {idx, menuLine, name}
         Map<String, Set<Integer>> nameLines = readNameLines();
-        String corridorLabels = null; // 走廊级方向标签，取首个成功站，后续站据此校验数据归属
-        int holes = 0;
-        for (String[] stop : stops) {
-            int idx = Integer.parseInt(stop[0]);
-            int menuLine = Integer.parseInt(stop[1]);
-            String name = stop[2];
-            Path out = cacheDir.resolve("tt_" + corridorId + "_" + idx + "_w" + weekday + ".txt");
-            if (!refresh && Files.exists(out)) continue;
-
-            List<Integer> candidates = new ArrayList<>();
-            candidates.add(menuLine);
-            for (int l : nameLines.getOrDefault(name, Set.of()))
-                if (l != menuLine) candidates.add(l);
-
-            int[][] tables = new int[2][];
-            String labels = null;
-            StringBuilder src = new StringBuilder();
-            for (int dir = 0; dir <= 1; dir++) {
-                for (int line : candidates) {
-                    try {
-                        String cookie = "line=" + line + "; station=" + enc(name)
-                                + "; weekday=" + weekday + "; direction=" + dir;
-                        String html = get(BASE + "/scheduling", cookie,
-                                "c" + corridorId + "_i" + idx + "_w" + weekday + "_d" + dir + ".html");
-                        Matcher am = ACTIVE_DIR.matcher(html);
-                        if (am.find() && Integer.parseInt(am.group(1)) != dir)
-                            throw new IOException("页面渲染方向与请求不符"); // 换下一个候选线路
-                        String lab = parseLabels(html);
-                        if (corridorLabels != null && !corridorLabels.equals(lab))
-                            throw new IOException("方向标签与走廊不符，疑似错误回退数据");
-                        labels = lab;
-                        tables[dir] = parseMinutes(html);
-                        if (src.length() > 0) src.append(';');
-                        src.append('d').append(dir).append("=L").append(line);
-                        break;
-                    } catch (IOException e) {
-                        tables[dir] = null; // 换下一个候选线路
-                    }
-                    Thread.sleep(150);
-                }
-                if (tables[dir] == null) tables[dir] = new int[0];
-                Thread.sleep(120);
+        // 走廊级方向标签，取首个成功站，后续站据此校验数据归属
+        AtomicReference<String> corridorLabels = new AtomicReference<>();
+        AtomicInteger holes = new AtomicInteger();
+        ExecutorService pool = Executors.newFixedThreadPool(Math.max(1, concurrency), r -> {
+            Thread t = new Thread(r, "crawl");
+            t.setDaemon(true);
+            return t;
+        });
+        List<Future<Boolean>> futures = new ArrayList<>();
+        try {
+            for (String[] stop : stops) {
+                int idx = Integer.parseInt(stop[0]);
+                Path out = cacheDir.resolve("tt_" + corridorId + "_" + idx + "_w" + weekday + ".txt");
+                if (!refresh && Files.exists(out)) continue;
+                futures.add(pool.submit(() -> crawlStation(corridorId, weekday, stop, corridorLabels, nameLines)));
             }
-            if (labels != null && corridorLabels == null) corridorLabels = labels;
-            boolean ok = tables[0].length > 0 || tables[1].length > 0;
-            if (!ok) holes++;
-            StringBuilder body = new StringBuilder();
-            body.append("# ok=").append(ok ? 1 : 0);
-            if (labels != null) body.append(" labels=").append(labels);
-            if (src.length() > 0) body.append(" src=").append(src);
-            body.append('\n');
-            for (int dir = 0; dir <= 1; dir++) {
-                // 按小时聚合输出，保持"小时→分钟"的茎叶结构
-                Map<Integer, List<Integer>> byHour = new TreeMap<>();
-                for (int sec : tables[dir]) {
-                    int hour = sec / 3600, minute = sec % 3600 / 60;
-                    byHour.computeIfAbsent(hour, k -> new ArrayList<>()).add(minute);
-                }
-                for (var e : byHour.entrySet()) {
-                    body.append(dir).append('\t').append(e.getKey());
-                    for (int minute : e.getValue()) body.append('\t').append(String.format("%02d", minute));
-                    body.append('\n');
+            for (Future<Boolean> f : futures) {
+                try {
+                    if (f.get()) holes.incrementAndGet();
+                } catch (ExecutionException e) {
+                    Throwable c = e.getCause();
+                    if (c instanceof IOException io) throw io;
+                    if (c instanceof InterruptedException ie) throw ie;
+                    throw new RuntimeException(c);
                 }
             }
-            Files.writeString(out, body.toString(), StandardCharsets.UTF_8);
+        } finally {
+            pool.shutdownNow();
         }
-        return holes;
+        return holes.get();
+    }
+
+    /** 抓取单站两个方向的时刻表并写缓存；返回是否为缺口站 */
+    private boolean crawlStation(int corridorId, int weekday, String[] stop,
+                                 AtomicReference<String> corridorLabels, Map<String, Set<Integer>> nameLines)
+            throws IOException, InterruptedException {
+        int idx = Integer.parseInt(stop[0]);
+        int menuLine = Integer.parseInt(stop[1]);
+        String name = stop[2];
+        Path out = cacheDir.resolve("tt_" + corridorId + "_" + idx + "_w" + weekday + ".txt");
+
+        List<Integer> candidates = new ArrayList<>();
+        candidates.add(menuLine);
+        for (int l : nameLines.getOrDefault(name, Set.of()))
+            if (l != menuLine) candidates.add(l);
+
+        int[][] tables = new int[2][];
+        String labels = null;
+        StringBuilder src = new StringBuilder();
+        for (int dir = 0; dir <= 1; dir++) {
+            for (int line : candidates) {
+                try {
+                    String cookie = "line=" + line + "; station=" + enc(name)
+                            + "; weekday=" + weekday + "; direction=" + dir;
+                    String html = get(BASE + "/scheduling", cookie,
+                            "c" + corridorId + "_i" + idx + "_w" + weekday + "_d" + dir + ".html");
+                    Matcher am = ACTIVE_DIR.matcher(html);
+                    if (am.find() && Integer.parseInt(am.group(1)) != dir)
+                        throw new IOException("页面渲染方向与请求不符"); // 换下一个候选线路
+                    String lab = parseLabels(html);
+                    String cl = corridorLabels.get();
+                    if (cl != null && !cl.equals(lab))
+                        throw new IOException("方向标签与走廊不符，疑似错误回退数据");
+                    labels = lab;
+                    tables[dir] = parseMinutes(html);
+                    corridorLabels.compareAndSet(null, lab);
+                    if (src.length() > 0) src.append(';');
+                    src.append('d').append(dir).append("=L").append(line);
+                    break;
+                } catch (IOException e) {
+                    tables[dir] = null; // 换下一个候选线路
+                }
+                Thread.sleep(150);
+            }
+            if (tables[dir] == null) tables[dir] = new int[0];
+        }
+        boolean ok = tables[0].length > 0 || tables[1].length > 0;
+        StringBuilder body = new StringBuilder();
+        body.append("# ok=").append(ok ? 1 : 0);
+        if (labels != null) body.append(" labels=").append(labels);
+        if (src.length() > 0) body.append(" src=").append(src);
+        body.append('\n');
+        for (int dir = 0; dir <= 1; dir++) {
+            // 按小时聚合输出，保持"小时→分钟"的茎叶结构
+            Map<Integer, List<Integer>> byHour = new TreeMap<>();
+            for (int sec : tables[dir]) {
+                int hour = sec / 3600, minute = sec % 3600 / 60;
+                byHour.computeIfAbsent(hour, k -> new ArrayList<>()).add(minute);
+            }
+            for (var e : byHour.entrySet()) {
+                body.append(dir).append('\t').append(e.getKey());
+                for (int minute : e.getValue()) body.append('\t').append(String.format("%02d", minute));
+                body.append('\n');
+            }
+        }
+        Files.writeString(out, body.toString(), StandardCharsets.UTF_8);
+        return !ok;
     }
 
     /** 页面里的方向标签，如 "0:花桥|1:苏州新区火车站" */
@@ -401,7 +447,7 @@ public final class Crawler {
                         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
                         .header("Accept", "*/*");
                 if (cookie != null) b.header("Cookie", cookie);
-                HttpResponse<byte[]> resp = newClient().send(b.build(), HttpResponse.BodyHandlers.ofByteArray());
+                HttpResponse<byte[]> resp = client.send(b.build(), HttpResponse.BodyHandlers.ofByteArray());
                 if (resp.statusCode() == 200) {
                     String body = new String(resp.body(), StandardCharsets.UTF_8);
                     saveRaw(rawName, body);

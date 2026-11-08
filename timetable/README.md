@@ -43,7 +43,7 @@ cd suzhou-metro-router
 
 # 2. 首次使用先抓取时刻表缓存（默认只抓"今天"对应的星期，全部缓存在 ./temp/cache）
 ./run.sh crawl                # 抓今天的时刻表
-./run.sh crawl --all-weekdays # 抓周一~周日全部（约 3800 个请求，需几分钟）
+./run.sh crawl --all-weekdays # 抓周一~周日全部（约 3800 个请求，站间并行、约 10 分钟）
 
 # 3. 查看所有线路/车站名（查询用的站名必须与此一致）
 ./run.sh stations
@@ -58,6 +58,7 @@ cd suzhou-metro-router
 #   --weekday 1..7      按星期几的时刻表查询（1=周一，缺省=今天）
 #   --transfer-min 5    同名站跨线换乘耗时分钟数（缺省 5）
 #   --refresh           强制重新抓取缓存
+#   --concurrency 4     抓取时站间并行数（1..16，缺省 4；服务端吞吐约 5~6 次/秒，再高只会排队）
 #   --cache-dir 目录    缓存目录（缺省 temp/cache；所有临时文件都在 ./temp 下）
 ```
 
