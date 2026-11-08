@@ -52,6 +52,8 @@ public final class Network {
     /** 一列车的停站序列：idx[k] 走廊站序，sec[k] 时刻（末站为到达时刻，非发车） */
     public static final class Run {
         public final int[] idx, sec;
+        /** 同车续行的对接走廊 id（跨走廊贯通的列车终点站续行处），-1 表示无 */
+        public int contCorridor = -1;
         Run(int[] idx, int[] sec) { this.idx = idx; this.sec = sec; }
         public int size() { return idx.length; }
     }
@@ -579,6 +581,7 @@ public final class Network {
                     System.arraycopy(cand.idx, 0, ni, 1, cand.size());
                     System.arraycopy(cand.sec, 0, ns, 1, cand.size());
                     runsB.set(rj, new Run(ni, ns));
+                    run.contCorridor = cidB;  // 同车续行：到贯通站后直接进入对接走廊
                     break;
                 }
             }

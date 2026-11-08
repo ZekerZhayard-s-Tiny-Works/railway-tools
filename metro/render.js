@@ -48,7 +48,7 @@ export function renderText(net, plan, opts) {
       s += name(row.stopGids[i]);
       if (i > 0) s += ` ${formatTime(row.stopArriveSec[i - 1])}`;
     }
-    out.push(`  ${legNo}. 乘${corridorName(c)}（往${toward}）${formatTime(row.boardSec)} ${name(row.stopGids[0])} 上车`);
+    out.push(`  ${legNo}. 乘${corridorName(c)}（往${toward}）${formatTime(row.boardSec)} ${name(row.stopGids[0])} ${row.through ? '同车续行（不下车）' : '上车'}`);
     out.push(`  ${s}`);
   }
   out.push(sep('－'));

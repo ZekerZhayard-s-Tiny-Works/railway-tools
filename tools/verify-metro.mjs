@@ -46,6 +46,9 @@ QUERIES.push({ from: '劳动路', to: '桑田岛', depart: '22:30', weekday: 1 }
 QUERIES.push({ from: '苏州新区火车站', to: '花桥', depart: '21:30', weekday: 1 });
 QUERIES.push({ from: '葑亭大道', to: '花桥', depart: '05:40', weekday: 1 });
 QUERIES.push({ from: '常楼', to: '木里', depart: '18:00', weekday: 5 });
+QUERIES.push({ from: '蠡墅', to: '石湖东路', depart: '07:50', weekday: 1 });
+QUERIES.push({ from: '木里', to: '龙道浜', depart: '07:40', weekday: 3 });
+QUERIES.push({ from: '蠡墅', to: '石湖东路', arrive: '08:30', weekday: 1 });
 
 const sec = (s) => {
   const [h, m, ss] = s.split(':').map(Number);

@@ -36,6 +36,8 @@ public final class Router {
         public final List<Integer> stopArriveSec = new ArrayList<>();
         Network.Run run;   // 所乘列车；toPos 为下车站在该车停站序列中的下标
         int toPos = -1;
+        /** 同车续行（跨走廊贯通）：这段车的上车站即上一段车的终点站，乘客不下车 */
+        public boolean through;
 
         Leg(int corridorId, int dir, int boardSec) {
             this.corridorId = corridorId;
@@ -83,13 +85,15 @@ public final class Router {
 
         /** 换乘候车余量合计：各次换乘走上站台后到发车的候车时间之和（走行时间固定，不计入） */
         public int transferWaitSec(int transferSec) {
-            int gap = 0, prevArrive = -1, prevCorridor = -1;
+            int gap = 0, prevArrive = -1;
+            boolean justTransferred = false;
             for (Object row : rows) {
+                if (row instanceof Transfer) { justTransferred = true; continue; }
                 if (row instanceof Leg leg) {
-                    // 同走廊换车（短交路续乘）没有走行时间，候车不扣 transferSec
-                    if (prevArrive >= 0) gap += (leg.boardSec - prevArrive) - (leg.corridorId == prevCorridor ? 0 : transferSec);
+                    // 只有真正换乘（有换乘行）才扣走行时间；同走廊续乘与跨走廊同车续行都不扣
+                    if (prevArrive >= 0) gap += (leg.boardSec - prevArrive) - (justTransferred ? transferSec : 0);
                     prevArrive = leg.stopArriveSec.get(leg.stopArriveSec.size() - 1);
-                    prevCorridor = leg.corridorId;
+                    justTransferred = false;
                 }
             }
             return gap;
@@ -186,18 +190,28 @@ public final class Router {
                     if (b < 0) continue;
                     int reachable = net.reachCount(corridor, dir, idx, weekday);
                     Set<Integer> covered = new HashSet<>();
+                    boolean hasCont = false;
+                    for (Network.Boarding x : list) if (x.run.contCorridor >= 0) { hasCont = true; break; }
                     // 按发车顺序逐班展开；某站首次出现即为最早到达（无越行），此后各班的同一站不再松弛
-                    for (int bi = b; bi < list.size() && covered.size() < reachable; bi++) {
+                    for (int bi = b; bi < list.size() && (hasCont || covered.size() < reachable); bi++) {
                         Network.Boarding bd = list.get(bi);
                         int gapAdd = afterTransfer ? bd.dep - c.time : 0;
                         for (int s = bd.pos + 1; s < bd.run.size(); s++) {
                             int nidx = bd.run.idx[s];
-                            if (!covered.add(nidx)) continue;
                             int arrive = bd.run.sec[s];
-                            relax(best, parent, pq, key(stops.get(nidx), corridor, false),
-                                    new Cost(arrive, c.gap + gapAdd, c.count),
-                                    new Edge(TYPE_RIDE, k, gid, corridor, corridor, dir, stops.get(nidx),
-                                            bd.dep, arrive, bd.run, bd.pos, s));
+                            if (covered.add(nidx)) {
+                                relax(best, parent, pq, key(stops.get(nidx), corridor, false),
+                                        new Cost(arrive, c.gap + gapAdd, c.count),
+                                        new Edge(TYPE_RIDE, k, gid, corridor, corridor, dir, stops.get(nidx),
+                                                bd.dep, arrive, bd.run, bd.pos, s));
+                            }
+                            // 同车续行（跨走廊贯通）：本车终点站即对接走廊起点，不受同站最早到达支配，不算换乘
+                            if (bd.run.contCorridor >= 0 && s == bd.run.size() - 1) {
+                                relax(best, parent, pq, key(stops.get(nidx), bd.run.contCorridor, false),
+                                        new Cost(arrive, c.gap + gapAdd, c.count),
+                                        new Edge(TYPE_RIDE, k, gid, corridor, corridor, dir, stops.get(nidx),
+                                                bd.dep, arrive, bd.run, bd.pos, s));
+                            }
                         }
                     }
                 }
@@ -286,6 +300,12 @@ public final class Router {
                     extendLeg(net, last, e);
                 } else {
                     Leg leg = newLeg(net, e);
+                    // 同车续行（跨走廊贯通）：上一段列车在终点站对接本段走廊，乘客不下车
+                    if (!plan.rows.isEmpty() && plan.rows.get(plan.rows.size() - 1) instanceof Leg prev
+                            && prev.run != null && prev.run.contCorridor == e.corridorId
+                            && e.departSec == prev.stopArriveSec.get(prev.stopArriveSec.size() - 1)) {
+                        leg.through = true;
+                    }
                     plan.rows.add(leg);
                     if (plan.boardSec < 0) plan.boardSec = e.departSec;
                 }

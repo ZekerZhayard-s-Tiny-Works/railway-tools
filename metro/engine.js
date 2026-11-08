@@ -343,7 +343,10 @@ export class Network {
         const want = last[1] + hopB;
         const cand = runsB.find((r) => r.stops[0][0] === nextB
           && r.stops[0][1] >= want && r.stops[0][1] <= want + TOL);
-        if (cand) cand.stops.unshift([atB, last[1]]);
+        if (cand) {
+          cand.stops.unshift([atB, last[1]]);
+          run.cont = { corridor: cidB };  // 同车续行：到贯通站后直接进入对接走廊
+        }
       }
     }
 
@@ -511,17 +514,24 @@ export class Router {
         if (b < 0) continue;
         const reachable = net.reachCount(corridor, dir, idx);
         const covered = new Set();
+        const hasCont = list.some((x) => x.run.cont);  // 有同车续行班次时不能提前结束扫描
         // 按发车顺序逐班展开；某站首次出现即为最早到达（无越行），此后各班的同一站不再松弛
-        for (let bi = b; bi < list.length && covered.size < reachable; bi++) {
+        for (let bi = b; bi < list.length && (hasCont || covered.size < reachable); bi++) {
           const { run, pos, dep } = list[bi];
           const gapAdd = afterTransfer ? dep - c.time : 0;
           for (let s = pos + 1; s < run.stops.length; s++) {
             const nidx = run.stops[s][0];
-            if (covered.has(nidx)) continue;
-            covered.add(nidx);
             const arrive = run.stops[s][1];
-            this.relaxEdge(bestCost, parent, pq, key(stops[nidx], corridor, false), { time: arrive, gap: c.gap + gapAdd, count: c.count },
-              { type: TYPE_RIDE, fromGid: gid, fromCorridor: corridor, corridorId: corridor, dir, toGid: stops[nidx], run, fromPos: pos, toPos: s, departSec: dep, arriveSec: arrive }, k);
+            if (!covered.has(nidx)) {
+              covered.add(nidx);
+              const edge = { type: TYPE_RIDE, fromGid: gid, fromCorridor: corridor, corridorId: corridor, dir, toGid: stops[nidx], run, fromPos: pos, toPos: s, departSec: dep, arriveSec: arrive };
+              this.relaxEdge(bestCost, parent, pq, key(stops[nidx], corridor, false), { time: arrive, gap: c.gap + gapAdd, count: c.count }, edge, k);
+            }
+            // 同车续行（跨走廊贯通）：本车终点站即对接走廊起点，不受同站最早到达支配，不算换乘
+            if (run.cont && s === run.stops.length - 1) {
+              const edge = { type: TYPE_RIDE, fromGid: gid, fromCorridor: corridor, corridorId: corridor, dir, toGid: stops[nidx], run, fromPos: pos, toPos: s, departSec: dep, arriveSec: arrive };
+              this.relaxEdge(bestCost, parent, pq, key(stops[nidx], run.cont.corridor, false), { time: arrive, gap: c.gap + gapAdd, count: c.count }, edge, k);
+            }
           }
         }
       }
@@ -596,16 +606,21 @@ export class Router {
         if (b < 0) continue;
         const reachable = net.reachCount(corridor, dir, idx);
         const covered = new Set();
-        for (let bi = b; bi < list.length && covered.size < reachable; bi++) {
+        const hasCont = list.some((x) => x.run.cont);
+        for (let bi = b; bi < list.length && (hasCont || covered.size < reachable); bi++) {
           const { run, pos, dep } = list[bi];
           const gapAdd = afterTransfer ? dep - c.time : 0;
           for (let s = pos + 1; s < run.stops.length; s++) {
             const nidx = run.stops[s][0];
-            if (covered.has(nidx)) continue;
-            covered.add(nidx);
-            this.relaxCost(bestCost, pq, key(stops[nidx], corridor, false), {
-              time: run.stops[s][1], gap: c.gap + gapAdd, count: c.count,
-            });
+            const arrive = run.stops[s][1];
+            const nc = { time: arrive, gap: c.gap + gapAdd, count: c.count };
+            if (!covered.has(nidx)) {
+              covered.add(nidx);
+              this.relaxCost(bestCost, pq, key(stops[nidx], corridor, false), nc);
+            }
+            // 同车续行（跨走廊贯通）
+            if (run.cont && s === run.stops.length - 1)
+              this.relaxCost(bestCost, pq, key(stops[nidx], run.cont.corridor, false), { ...nc });
           }
         }
       }
@@ -674,19 +689,24 @@ export class Router {
         if (b < 0) continue;
         const reachable = net.reachCount(corridor, dir, idx);
         const covered = new Set();
-        for (let bi = b; bi < list.length && covered.size < reachable; bi++) {
+        const hasCont = list.some((x) => x.run.cont);
+        for (let bi = b; bi < list.length && (hasCont || covered.size < reachable); bi++) {
           const { run, pos, dep } = list[bi];
           const gapAdd = afterTransfer ? dep - cost.time : 0;
           for (let s = pos + 1; s < run.stops.length; s++) {
             const nidx = run.stops[s][0];
-            if (covered.has(nidx)) continue;
-            covered.add(nidx);
             const arrive = run.stops[s][1];
             const nc = { time: arrive, gap: cost.gap + gapAdd, count: cost.count };
-            if (!eq(key(stops[nidx], corridor, false), nc)) continue;
-            path.push({ type: TYPE_RIDE, fromGid: gid, corridorId: corridor, dir, toGid: stops[nidx], run, fromPos: pos, toPos: s, departSec: dep, arriveSec: arrive });
-            walk(stops[nidx], corridor, false, nc, path, true);
-            path.pop();
+            const isLast = s === run.stops.length - 1;
+            const targets = [];
+            if (!covered.has(nidx)) { covered.add(nidx); targets.push(corridor); }
+            if (run.cont && isLast) targets.push(run.cont.corridor);  // 同车续行
+            for (const tcorr of targets) {
+              if (!eq(key(stops[nidx], tcorr, false), nc)) continue;
+              path.push({ type: TYPE_RIDE, fromGid: gid, corridorId: corridor, dir, toGid: stops[nidx], run, fromPos: pos, toPos: s, departSec: dep, arriveSec: arrive });
+              walk(stops[nidx], tcorr, false, nc, path, true);
+              path.pop();
+            }
           }
         }
       }
@@ -771,7 +791,13 @@ export class Router {
         if (last && last.run === e.run && last.toPos === e.fromPos && (mergeSameLine || last.boardSec === e.run.stops[e.fromPos][1])) {
           this.extendLeg(last, e);
         } else {
-          plan.rows.push(this.newLeg(e));
+          const leg = this.newLeg(e);
+          // 同车续行（跨走廊贯通）：上一段列车在终点站对接本段走廊，乘客不下车
+          if (last && last.run?.cont && last.run.cont.corridor === e.corridorId
+            && e.departSec === last.stopArriveSec[last.stopArriveSec.length - 1]) {
+            leg.through = true;
+          }
+          plan.rows.push(leg);
           if (plan.boardSec < 0) plan.boardSec = e.departSec;
         }
       }
@@ -785,7 +811,7 @@ export class Router {
     const stopGids = [], stopArriveSec = [];
     for (let s = e.fromPos; s <= e.toPos; s++) stopGids.push(net.corridors.get(e.corridorId).stopGids[e.run.stops[s][0]]);
     for (let s = e.fromPos + 1; s <= e.toPos; s++) stopArriveSec.push(e.run.stops[s][1]);
-    return { transfer: false, corridorId: e.corridorId, dir: e.dir, run: e.run, toPos: e.toPos, boardSec: e.departSec, stopGids, stopArriveSec };
+    return { transfer: false, through: false, corridorId: e.corridorId, dir: e.dir, run: e.run, toPos: e.toPos, boardSec: e.departSec, stopGids, stopArriveSec };
   }
 
   /** 延长一段行程至 e.toPos */
@@ -820,14 +846,14 @@ function dedupePlans(plans) {
 
 /** 方案统计：换乘次数、换乘候车余量合计、经由站数 */
 export function planStats(plan, transferSec) {
-  let transfers = 0, gap = 0, stops = 0, prevArrive = -1, prevCorridor = -1;
+  let transfers = 0, gap = 0, stops = 0, prevArrive = -1, justTransferred = false;
   for (const row of plan.rows) {
-    if (row.transfer) { transfers++; continue; }
+    if (row.transfer) { transfers++; justTransferred = true; continue; }
     stops += row.stopGids.length - 1;
-    // 同走廊换车（短交路续乘）没有走行时间，候车不扣 transferSec
-    if (prevArrive >= 0) gap += (row.boardSec - prevArrive) - (row.corridorId === prevCorridor ? 0 : transferSec);
+    // 只有真正换乘（有换乘行）才扣走行时间；同走廊续乘与跨走廊同车续行都不扣
+    if (prevArrive >= 0) gap += (row.boardSec - prevArrive) - (justTransferred ? transferSec : 0);
     prevArrive = row.stopArriveSec[row.stopArriveSec.length - 1];
-    prevCorridor = row.corridorId;
+    justTransferred = false;
   }
   return { transfers, gap, stops };
 }
