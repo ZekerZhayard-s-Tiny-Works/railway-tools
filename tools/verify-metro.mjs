@@ -49,6 +49,8 @@ QUERIES.push({ from: '常楼', to: '木里', depart: '18:00', weekday: 5 });
 QUERIES.push({ from: '蠡墅', to: '石湖东路', depart: '07:50', weekday: 1 });
 QUERIES.push({ from: '木里', to: '龙道浜', depart: '07:40', weekday: 3 });
 QUERIES.push({ from: '蠡墅', to: '石湖东路', arrive: '08:30', weekday: 1 });
+QUERIES.push({ from: '石湖东路', to: '木里', arrive: '08:36', weekday: 1 });
+QUERIES.push({ from: '石湖东路', to: '木里', depart: '08:10', weekday: 1 });
 
 const sec = (s) => {
   const [h, m, ss] = s.split(':').map(Number);

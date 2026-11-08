@@ -570,6 +570,7 @@ public final class Network {
                 if (lastIdx != atA) continue;
                 int arrive = run.sec[run.size() - 1];
                 int want = arrive + hopB;
+                boolean linked = false;
                 for (int rj = 0; rj < runsB.size(); rj++) {
                     Run cand = runsB.get(rj);
                     if (cand.idx[0] != nextB) continue;
@@ -582,7 +583,17 @@ public final class Network {
                     System.arraycopy(cand.sec, 0, ns, 1, cand.size());
                     runsB.set(rj, new Run(ni, ns));
                     run.contCorridor = cidB;  // 同车续行：到贯通站后直接进入对接走廊
+                    linked = true;
                     break;
+                }
+                if (!linked) {
+                    // B 侧列车本身就从贯通站始发（同一物理列车，时刻相同）：只建立续行标记
+                    for (Run cand : runsB) {
+                        if (cand.idx[0] == atB && Math.abs(cand.sec[0] - arrive) <= TOL) {
+                            run.contCorridor = cidB;
+                            break;
+                        }
+                    }
                 }
             }
         }

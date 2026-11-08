@@ -346,6 +346,10 @@ export class Network {
         if (cand) {
           cand.stops.unshift([atB, last[1]]);
           run.cont = { corridor: cidB };  // 同车续行：到贯通站后直接进入对接走廊
+        } else {
+          // B 侧列车本身就从贯通站始发（同一物理列车，时刻相同）：只建立续行标记
+          const cand2 = runsB.find((r) => r.stops[0][0] === atB && Math.abs(r.stops[0][1] - last[1]) <= TOL);
+          if (cand2) run.cont = { corridor: cidB };
         }
       }
     }
