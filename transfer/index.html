@@ -36,6 +36,9 @@
       <label class="field">换乘预留（分钟）
         <input id="minTransfer" type="number" value="15" min="0" max="1440" step="1">
       </label>
+      <label class="field wide">排除车次（可空）
+        <input id="exclude" type="text" autocomplete="off" placeholder="如 G,D（字头） 或 G1000-G2000（号段） 或 1000-2000（仅纯数字车次） 或 G1234（具体车次），逗号/空格分隔">
+      </label>
       <label class="field">接驳速度（km/h）
         <input id="speed" type="number" value="20" min="0.5" max="200" step="0.5">
       </label>

@@ -91,6 +91,46 @@ function parseStops(bytes, p, count, stationCount) {
   return { station, arrOffset, depOffset };
 }
 
+/**
+ * 编译「排除车次」规则（逗号/空格分隔，可混合写法）：
+ *   G / D ……      字头，排除该字头全部车次
+ *   G1234 / 1461   具体车次
+ *   G1000-G2000    字头 + 号段
+ *   1000-2000      纯数字车次（无字头）的号段
+ * 成对车次（如 C1101/C1104）按任一部分匹配；空规则返回 null。
+ */
+export function compileTrainExclude(spec) {
+  const items = String(spec ?? '').split(/[\s,，;；、]+/).filter((x) => x !== '');
+  const rules = [];
+  for (const it of items) {
+    let m;
+    if ((m = /^([A-Za-z]+)$/.exec(it))) {
+      rules.push({ prefix: m[1].toUpperCase(), min: 0, max: Infinity });
+    } else if ((m = /^([A-Za-z]*)(\d+)\s*[-~—–至到]\s*([A-Za-z]*)(\d+)$/.exec(it))) {
+      const p1 = m[1].toUpperCase(), p2 = m[3].toUpperCase();
+      if (p1 && p2 && p1 !== p2) throw new Error(`排除规则的起止字头不一致: ${it}`);
+      rules.push({ prefix: p1 || p2, min: Number(m[2]), max: Number(m[4]) });
+    } else if ((m = /^([A-Za-z]*)(\d+)$/.exec(it))) {
+      rules.push({ prefix: m[1].toUpperCase(), min: Number(m[2]), max: Number(m[2]) });
+    } else {
+      throw new Error(`无法识别的排除规则: ${it}`);
+    }
+  }
+  if (rules.length === 0) return null;
+  return (name) => {
+    for (const part of String(name).split('/')) {
+      const mm = /^([A-Za-z]*)(\d+)$/.exec(part);
+      if (!mm) continue;
+      const prefix = mm[1].toUpperCase(), num = Number(mm[2]);
+      for (const r of rules) {
+        if (prefix !== r.prefix) continue;  // 纯数字规则（prefix 为空）只匹配无字头车次
+        if (num >= r.min && num <= r.max) return true;
+      }
+    }
+    return false;
+  };
+}
+
 export class TransferEngine {
   constructor(stationNames, trainNames, trains, rules, rides, ver) {
     this.stationNames = stationNames;
@@ -306,8 +346,8 @@ export class TransferEngine {
     return null;
   }
 
-  /** from/to 为站名；time 为 yyyyMMddhhmm */
-  search(from, to, time, departMode, minTransfer) {
+  /** from/to 为站名；time 为 yyyyMMddhhmm；exclude 为排除车次规则（可空） */
+  search(from, to, time, departMode, minTransfer, exclude = null) {
     const f = this.stationLookup.get(String(from).toUpperCase());
     const t = this.stationLookup.get(String(to).toUpperCase());
     if (f === undefined) throw new Error(`找不到出发站: ${from}`);
@@ -315,21 +355,29 @@ export class TransferEngine {
     if (!/^\d{12}$/.test(time ?? '')) throw new Error('时间格式应为 YYYYMMDDhhmm');
     if (minTransfer < 0) throw new Error('换乘时间不能为负数');
 
+    // 排除车次：编译为按车次序号的标记数组（每段乘车都要检查，预计算避免重复匹配）
+    let excluded = null;
+    const isExcluded = exclude ? compileTrainExclude(exclude) : null;
+    if (isExcluded) {
+      excluded = new Uint8Array(this.trainNames.length);
+      for (let i = 0; i < this.trainNames.length; i++) if (isExcluded(this.trainNames[i])) excluded[i] = 1;
+    }
+
     const inputMinute = toAbsMinute(time);
     let first, second;
     if (departMode) {
-      first = this.searchForward(f, t, inputMinute, minTransfer, Number.MAX_SAFE_INTEGER);
+      first = this.searchForward(f, t, inputMinute, minTransfer, Number.MAX_SAFE_INTEGER, excluded);
       if (first === null) return null;
-      second = this.searchBackward(f, t, first.arrivalTime(), minTransfer, inputMinute);
+      second = this.searchBackward(f, t, first.arrivalTime(), minTransfer, inputMinute, excluded);
     } else {
-      first = this.searchBackward(f, t, inputMinute, minTransfer, Number.MIN_SAFE_INTEGER);
+      first = this.searchBackward(f, t, inputMinute, minTransfer, Number.MIN_SAFE_INTEGER, excluded);
       if (first === null) return null;
-      second = this.searchForward(f, t, first.departureTime(), minTransfer, inputMinute);
+      second = this.searchForward(f, t, first.departureTime(), minTransfer, inputMinute, excluded);
     }
     return second !== null ? second : first;
   }
 
-  searchForward(from, to, start, minTransfer, hardCeiling) {
+  searchForward(from, to, start, minTransfer, hardCeiling, excluded = null) {
     const deadline = Math.min(start + MAX_SEARCH_DAYS * 1440, hardCeiling);
     const labels = new Array(this.stationNames.length).fill(null);
     const pq = new Heap((a, b) => a.time - b.time || a.legs - b.legs || b.wait - a.wait);
@@ -349,6 +397,7 @@ export class TransferEngine {
 
       for (let k = this.rides.outStart[cur.station]; k < this.rides.outStart[cur.station + 1]; k++) {
         const ri = this.rides.outRide[k];
+        if (excluded !== null && excluded[this.rides.trainId[ri]]) continue;
         const occ = this.nextOccurrence(ri, cur.boardFrom, pruneAfter);
         if (occ === null) continue;
         const wait = cur.wait + (cur.legs === 0 ? 0 : occ.dep - cur.time);
@@ -385,7 +434,7 @@ export class TransferEngine {
     return base;
   }
 
-  searchBackward(from, to, deadline, minTransfer, hardFloor) {
+  searchBackward(from, to, deadline, minTransfer, hardFloor, excluded = null) {
     const floor = Math.max(deadline - MAX_SEARCH_DAYS * 1440, hardFloor);
     const labels = new Array(this.stationNames.length).fill(null);
     const pq = new Heap((a, b) => b.time - a.time || a.legs - b.legs || b.wait - a.wait);
@@ -405,6 +454,7 @@ export class TransferEngine {
 
       for (let k = this.rides.inStart[cur.station]; k < this.rides.inStart[cur.station + 1]; k++) {
         const ri = this.rides.inRide[k];
+        if (excluded !== null && excluded[this.rides.trainId[ri]]) continue;
         const occ = this.previousOccurrence(ri, cur.boardFrom, pruneBefore);
         if (occ === null) continue;
         const wait = cur.wait + (cur.legs === 0 ? 0 : cur.time - occ.arr);
@@ -421,6 +471,7 @@ export class TransferEngine {
           if (latestArrival < floor) continue;
           for (let k = this.rides.inStart[x]; k < this.rides.inStart[x + 1]; k++) {
             const ri = this.rides.inRide[k];
+            if (excluded !== null && excluded[this.rides.trainId[ri]]) continue;
             const occ = this.previousOccurrence(ri, latestArrival, pruneBefore);
             if (occ === null) continue;
             const wait = cur.wait + (cur.legs === 0 ? 0 : Math.max(0, cur.time - occ.arr - walkMin));

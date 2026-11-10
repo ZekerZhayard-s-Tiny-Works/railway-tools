@@ -1,5 +1,5 @@
 // 全国铁路中转换乘查询页面：加载路路通数据，跑搜索并渲染结果表格。
-import { TransferEngine, formatResult, formatTime, formatDuration, trimNumPublic } from './engine.js';
+import { TransferEngine, formatResult, formatTime, formatDuration, trimNumPublic, compileTrainExclude } from './engine.js';
 import { attachSuggest } from '../suggest.js';
 
 const $ = (id) => document.getElementById(id);
@@ -93,6 +93,7 @@ async function run() {
   const minTransfer = +$('minTransfer').value;
   const walkEnabled = $('walk').checked;
   const speed = +$('speed').value, maxDist = +$('maxDist').value;
+  const excludeSpec = $('exclude').value.trim();
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time)) return fail('请填写日期与时间');
   if (!(minTransfer >= 0)) return fail('换乘预留不能为负数');
@@ -112,7 +113,13 @@ async function run() {
     setStatus('正在搜索…');
     const stamp = `${date.replaceAll('-', '')}${time.replace(':', '')}`;
     const t0 = Date.now();
-    const result = engine.search(from, to, stamp, departMode, minTransfer);
+    const result = engine.search(from, to, stamp, departMode, minTransfer, excludeSpec || null);
+    if (excludeSpec) {
+      const test = compileTrainExclude(excludeSpec);
+      let hit = 0;
+      if (test) for (const name of engine.trainNames) if (test(name)) hit++;
+      log(`排除车次: ${excludeSpec}（命中 ${hit} 个车次）`);
+    }
     renderResult(result);
     $('result').hidden = false;
     setStatus(`搜索完成（${((Date.now() - t0) / 1000).toFixed(1)} 秒）`);
