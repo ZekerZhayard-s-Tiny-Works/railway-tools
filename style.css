@@ -101,7 +101,43 @@ button.ghost { color: var(--fg); background: var(--bg); border-color: var(--line
 }
 .stops { margin: 6px 0 0 1.6em; color: var(--fg); font-size: 14px; line-height: 1.9; word-break: break-word; }
 .stops .t { color: var(--muted); font-variant-numeric: tabular-nums; margin-left: 4px; }
-.xfer { margin: 8px 0 0; padding: 7px 10px; background: var(--bg-soft); border-left: 3px solid var(--accent); border-radius: 0 7px 7px 0; font-size: 14px; }
+.xfer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 8px 0 0;
+  padding: 7px 10px;
+  background: var(--bg-soft);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 7px 7px 0;
+  font-size: 14px;
+}
+
+/* 站层示意图缩略图：点击在新标签打开原图 */
+.station-photo {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  text-decoration: none;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+.station-photo img {
+  height: 72px;
+  width: auto;
+  max-width: 130px;
+  object-fit: contain;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  display: block;
+}
+.station-photo:hover img { border-color: var(--accent); }
+.leg-head .station-photo { align-self: center; }
 
 .plan-title {
   margin: 18px 0 8px;

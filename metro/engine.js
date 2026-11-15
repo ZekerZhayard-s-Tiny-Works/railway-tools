@@ -638,10 +638,16 @@ export class Router {
     for (const [k, c] of bestCost) if (decodeKey(k).gid === toGid && c.time < minArrive) minArrive = c.time;
     if (minArrive === Infinity) return [];
 
-    const out = [];
-    this.enumerate(fromGid, toGid, startSec, minArrive, bestCost, out);
-    out.sort((a, b) => cmpCost(a.cost, b.cost));
-    const plans = dedupePlans(out.map((x) => this.buildPlan(x.path, startSec, minArrive, true)));
+    // 先按无约束枚举（快），再滤掉重复经过车站的方案；
+    // 只有「全部最快方案都要重复经过车站」时才带约束重新枚举（少见，代价可接受）
+    const collect = (enforceVisited) => {
+      const out = [];
+      this.enumerate(fromGid, toGid, startSec, minArrive, bestCost, out, enforceVisited);
+      out.sort((a, b) => cmpCost(a.cost, b.cost));
+      return dedupePlans(out.map((x) => this.buildPlan(x.path, startSec, minArrive, true)));
+    };
+    let plans = collect(false).filter((p) => !hasRepeatStation(p));
+    if (plans.length === 0) plans = collect(true);
     // 并列最早到达时只保留最晚出发的方案（同一时刻到达，不必更早到站台）
     let latestBoard = -1;
     for (const p of plans) if (p.boardSec > latestBoard) latestBoard = p.boardSec;
@@ -660,20 +666,22 @@ export class Router {
    * 同一线路同一方向上「下车后立刻又上同一班车」与「一次坐到底」等价，
    * 这类拆分会让枚举量爆炸并产生重复方案，因此在续乘时不重复上同一班车。
    */
-  enumerate(fromGid, toGid, startSec, minArrive, bestCost, out) {
+  enumerate(fromGid, toGid, startSec, minArrive, bestCost, out, enforceVisited = false) {
     const net = this.net;
     const seen = new Set();
     // 紧边只看到达时刻：等时但换乘点/换乘次数不同的经由也要列出（重复经由由 dedupePlans 去重）
     const eq = (k, cost) => bestCost.get(k)?.time === cost.time;
 
     // ridden：是否已乘过车。起点站可直选任一走廊，未乘车时再"换乘"只会产生伪方案
-    const walk = (gid, corridor, afterTransfer, cost, path, ridden) => {
+    // visited：已经过的车站集合（仅 enforceVisited 时维护），保证不重复经过同一车站
+    const walk = (gid, corridor, afterTransfer, cost, path, ridden, visited) => {
       if (gid === toGid && cost.time === minArrive) {
         out.push({ path: [...path], cost: { ...cost } });
         return;
       }
       if (cost.time > minArrive) return;
       // 同一 (状态, 代价, 步数) 只展开一次：折返列车会形成零耗时环
+      // （visited 已保证不会重复经过车站，签名里不必再带它，否则状态数会爆炸）
       const sig = `${gid}/${corridor}/${afterTransfer}/${cost.time}/${cost.gap}/${cost.count}/${path.length}`;
       if (seen.has(sig)) return;
       seen.add(sig);
@@ -683,7 +691,7 @@ export class Router {
           const nc = { time: cost.time, gap: cost.gap, count: cost.count };
           if (!eq(key(gid, l, false), nc)) continue;
           path.push({ type: TYPE_START, fromGid: gid, corridorId: l, dir: -1, toGid: gid, departSec: cost.time, arriveSec: cost.time });
-          walk(gid, l, false, nc, path, false);
+          walk(gid, l, false, nc, path, false, visited);
           path.pop();
         }
         return;
@@ -701,8 +709,12 @@ export class Router {
         for (let bi = b; bi < list.length && (hasCont || covered.size < reachable); bi++) {
           const { run, pos, dep } = list[bi];
           const gapAdd = afterTransfer ? dep - cost.time : 0;
+          const nv = visited === null ? null : new Set(visited);
           for (let s = pos + 1; s < run.stops.length; s++) {
             const nidx = run.stops[s][0];
+            const stopGid = stops[nidx];
+            if (visited !== null && visited.has(stopGid)) break;   // 再次经过已访问车站：本班车更远的站也不可达
+            if (nv !== null) nv.add(stopGid);
             const arrive = run.stops[s][1];
             const nc = { time: arrive, gap: cost.gap + gapAdd, count: cost.count };
             const isLast = s === run.stops.length - 1;
@@ -712,7 +724,7 @@ export class Router {
             for (const tcorr of targets) {
               if (!eq(key(stops[nidx], tcorr, false), nc)) continue;
               path.push({ type: TYPE_RIDE, fromGid: gid, corridorId: corridor, dir, toGid: stops[nidx], run, fromPos: pos, toPos: s, departSec: dep, arriveSec: arrive });
-              walk(stops[nidx], tcorr, false, nc, path, true);
+              walk(stops[nidx], tcorr, false, nc, path, true, nv);
               path.pop();
             }
           }
@@ -724,12 +736,13 @@ export class Router {
         const nc = { time: cost.time + this.transferSec, gap: cost.gap, count: cost.count + 1 };
         if (!eq(key(gid, m, true), nc)) continue;
         path.push({ type: TYPE_TRANSFER, fromGid: gid, corridorId: m, dir: -1, toGid: gid, departSec: cost.time, arriveSec: nc.time });
-        walk(gid, m, true, nc, path, true);
+        walk(gid, m, true, nc, path, true, visited);
         path.pop();
       }
     };
 
-    walk(fromGid, START, false, { time: startSec, gap: 0, count: 0 }, [], false);
+    walk(fromGid, START, false, { time: startSec, gap: 0, count: 0 }, [], false,
+      enforceVisited ? new Set([fromGid]) : null);
   }
 
   /**
@@ -740,7 +753,9 @@ export class Router {
     const plan = this.fastestFrom(fromGid, toGid, startSec);
     if (!plan || fromGid === toGid) return plan;
     // 在保证同一到达时刻 A* 的前提下求最晚出发：等价于「以 A* 为期限求最晚出发」
-    return this.routeArrive(fromGid, toGid, plan.arriveSec) ?? plan;
+    const best = this.routeArrive(fromGid, toGid, plan.arriveSec) ?? plan;
+    // 单方案若重复经过车站，改用带约束的枚举结果（少见，兜底）
+    return hasRepeatStation(best) ? (this.routeDepartAll(fromGid, toGid, startSec)[0] ?? best) : best;
   }
 
   /** 给定到达时限，返回"最晚出发仍不迟到"的方案；无法按时到达返回 null（与 Java 版一致） */
@@ -842,6 +857,20 @@ export class Router {
     }
     leg.toPos = e.toPos;
   }
+}
+
+/** 方案是否重复经过同一车站（折返/绕环）。换乘站作为相邻两段的分界重复出现属正常 */
+function hasRepeatStation(plan) {
+  const seen = new Set();
+  for (const row of plan.rows) {
+    if (row.transfer) continue;
+    for (let i = 0; i < row.stopGids.length; i++) {
+      const gid = row.stopGids[i];
+      if (i > 0 && seen.has(gid)) return true;
+      seen.add(gid);
+    }
+  }
+  return false;
 }
 
 /** 方案签名：按「换乘点 + 各乘车段的线路/方向/上下车站」判定，乘车中途换车不构成不同方案 */

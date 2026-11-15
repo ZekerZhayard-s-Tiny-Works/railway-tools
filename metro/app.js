@@ -42,6 +42,31 @@ function fail(message, suggestions) {
   $('result').hidden = true;
 }
 
+// 站层示意图（外链官网静态图片）；图片加载失败时整块隐藏
+const PHOTO_HOST = 'https://www.sz-mtr.com';
+function stationPhoto(net, gid, label) {
+  const name = net.nameOfGid[gid];
+  const path = stationMeta[name]?.img;
+  if (!path) return null;
+  const url = PHOTO_HOST + encodeURI(path);
+  const a = document.createElement('a');
+  a.className = 'station-photo';
+  a.href = url;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  a.title = `${name} 站层示意图（点击看大图）`;
+  const img = document.createElement('img');
+  img.loading = 'lazy';
+  img.decoding = 'async';
+  img.alt = `${name}站层示意图`;
+  img.src = url;
+  img.addEventListener('error', () => a.remove());
+  const cap = document.createElement('span');
+  cap.textContent = `${label} ${name}`;
+  a.append(img, cap);
+  return a;
+}
+
 function renderPlan(net, plans, opts) {
   const summary = $('summary'), timeline = $('timeline');
   if (plans.length === 0) {
@@ -68,11 +93,16 @@ function renderPlan(net, plans, opts) {
       timeline.appendChild(title);
     }
     let legNo = 0;
+    let lastGid = -1;
     for (const row of plan.rows) {
       if (row.transfer) {
         const div = document.createElement('div');
         div.className = 'xfer';
-        div.textContent = `◇ ${net.nameOfGid[row.gid]} 换乘（约 ${opts.transferMin.toFixed(0)} 分钟，${formatTime(row.platformSec)} 走到站台）`;
+        const text = document.createElement('span');
+        text.textContent = `◇ ${net.nameOfGid[row.gid]} 换乘（约 ${opts.transferMin.toFixed(0)} 分钟，${formatTime(row.platformSec)} 走到站台）`;
+        div.appendChild(text);
+        const photo = stationPhoto(net, row.gid, '换乘站');
+        if (photo) div.appendChild(photo);
         timeline.appendChild(div);
         continue;
       }
@@ -85,6 +115,10 @@ function renderPlan(net, plans, opts) {
       legHead.innerHTML = `<span class="leg-no">${plans.length > 1 ? `${idx + 1}.${legNo}` : legNo}.</span><span class="badge">${corridorName(c)}</span>`
         + `<span>往${row.dir === 0 ? c.d0Label : c.d1Label}</span>`
         + `<strong>${formatTime(row.boardSec)}</strong><span>${net.nameOfGid[row.stopGids[0]]} ${row.through ? '同车续行（不下车）' : '上车'}</span>`;
+      if (legNo === 1) {
+        const photo = stationPhoto(net, row.stopGids[0], '起点');
+        if (photo) legHead.appendChild(photo);
+      }
       leg.appendChild(legHead);
       const stops = document.createElement('div');
       stops.className = 'stops';
@@ -93,11 +127,16 @@ function renderPlan(net, plans, opts) {
         : ` → ${net.nameOfGid[gid]}<span class="t">${formatTime(row.stopArriveSec[i - 1])}</span>`)).join('');
       leg.appendChild(stops);
       timeline.appendChild(leg);
+      lastGid = row.stopGids[row.stopGids.length - 1];
     }
     const st = planStats(plan, Math.round(opts.transferMin * 60));
     const stats = document.createElement('div');
     stats.className = 'xfer';
-    stats.textContent = `经由 ${st.stops} 站 / 换乘 ${st.transfers} 次 / 换乘候车合计 ${Math.trunc(st.gap / 60)} 分钟`;
+    const statsText = document.createElement('span');
+    statsText.textContent = `经由 ${st.stops} 站 / 换乘 ${st.transfers} 次 / 换乘候车合计 ${Math.trunc(st.gap / 60)} 分钟`;
+    stats.appendChild(statsText);
+    const arrivePhoto = lastGid >= 0 ? stationPhoto(net, lastGid, '终点') : null;
+    if (arrivePhoto) stats.appendChild(arrivePhoto);
     timeline.appendChild(stats);
   });
 
@@ -153,6 +192,8 @@ for (const radio of document.querySelectorAll('input[name="mode"]')) {
 }
 
 raw = await getJson('data/network.json');
+// 站名 -> 站层示意图（由 tools/build-station-meta.mjs 生成；缺文件时不影响查询）
+const stationMeta = await getJson('data/stations-meta.json').catch(() => ({}));
 // 每次打开/刷新都用当前星期与时刻，避免浏览器恢复上次输入导致时间过期
 const pad = (n) => String(n).padStart(2, '0');
 const resetNow = () => {

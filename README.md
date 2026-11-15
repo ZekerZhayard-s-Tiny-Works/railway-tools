@@ -2,7 +2,7 @@
 
 两个在浏览器里本地运行的车次/换乘查询工具，无需后端、无第三方脚本：
 
-- **`metro/` 苏州地铁路由查询** —— 给定出发车站与出发（或到达）时刻，用时间相关 Dijkstra 求时间最短的乘车方案与换乘点，并列出**全部并列最快**的方案。载入时由逐站时刻表重建列车运行图，按「能上这列车、能在这站下」展开，正确处理大小交路、大站快车跳站与终点站到达时刻。
+- **`metro/` 苏州地铁路由查询** —— 给定出发车站与出发（或到达）时刻，用时间相关 Dijkstra 求时间最短的乘车方案与换乘点，并列出**全部并列最快**的方案；方案不会重复经过同一车站（不折返、不绕环），结果内嵌起点/换乘站/终点的站层示意图。载入时由逐站时刻表重建列车运行图，按「能上这列车、能在这站下」展开，正确处理大小交路、大站快车跳站与终点站到达时刻。
 - **`transfer/` 全国铁路中转换乘查询** —— 在全国铁路车次中搜索换乘方案，支持按出发或到达时刻查询、排除指定字头/号段/车次（如 `G,D`、`G1000-G2000`、`1000-2000`），并可用车站坐标把邻近车站作为接驳段。
 
 首页 `index.html` 是两个工具的入口。整个目录就是一个可直接发布到 GitHub Pages 的静态站点。
@@ -16,6 +16,7 @@ metro/
   engine.js                              Network / Router（由 timetable 的 Java 代码移植，含列车运行图重建）
   render.js                              文本输出渲染（与 Java 命令行版逐字一致）
   data/network.json                      走廊、车站、官网站对时间（仅相邻站对用于路由）
+  data/stations-meta.json                站名 -> 站层示意图地址（外链官网图片）
   data/tt_w1..w7.json                    各星期逐站发车时刻表
 transfer/
   index.html  app.js
@@ -25,6 +26,7 @@ transfer/
 timetable/                               苏州地铁抓取程序（Java 源码，供定时任务编译运行）
 tools/
   build-metro-data.mjs                   由 timetable 的抓取缓存生成 metro/data
+  build-station-meta.mjs                 生成 stations-meta.json（需在本机跑，官网对境外 403）
   update-lltskb-data.mjs                 由 down.lltskb.com 更新 transfer/data
   verify-metro.mjs verify-transfer.mjs   与 Java 版逐字符对拍
   verify-transfer-data.mjs               路路通数据自检（规模阈值 + 样本查询）
