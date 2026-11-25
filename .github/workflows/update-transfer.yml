@@ -73,8 +73,9 @@ jobs:
           # 每次尝试用不同产物名：重跑（attempt>=2）时，旧的同名产物不会导致部署失败
           name: github-pages-${{ github.run_attempt }}
 
-      # GitHub 的产物元数据接口有延迟：刚上传完立刻查询可能返回 0 个产物，deploy-pages 会因此失败。
-      # 这里轮询等待产物可见（最多约 90 秒）。
+      # GitHub 的产物元数据接口有延迟：deploy-pages 通过 Actions 产物服务（Twirp）查询，
+      # 刚上传完立刻查询可能返回 0 个产物，导致部署失败。这里先轮询 REST 接口，
+      # 再轮询 deploy-pages 实际使用的产物服务，等产物真正可见后再部署。
       - name: 等待 Pages 产物可查询
         env:
           GH_TOKEN: ${{ github.token }}
@@ -83,12 +84,31 @@ jobs:
           for i in $(seq 1 45); do
             n=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?name=$name" --jq '.artifacts | length' 2>/dev/null || echo 0)
             if [ "$n" -gt 0 ]; then
-              echo "产物 $name 已可见（第 $i 次查询）"
-              exit 0
+              echo "REST: 产物 $name 已可见（第 $i 次查询）"
+              break
             fi
             sleep 2
           done
-          echo "等待产物 $name 超时"; exit 1
+          ok=0
+          for i in $(seq 1 30); do
+            body=$(curl -sS --max-time 5 -X POST "$ACTIONS_RESULTS_URL/twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts" -H "Authorization: Bearer $ACTIONS_RUNTIME_TOKEN" -H 'Content-Type: application/json' -d '{}' 2>/dev/null || true)
+            if [ -n "$body" ]; then
+              ok=1
+              n=$(printf '%s' "$body" | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(1 for a in d.get('artifacts',[]) if a.get('name')==sys.argv[1]))" "$name" 2>/dev/null || echo 0)
+              if [ "${n:-0}" -gt 0 ]; then
+                echo "产物服务: $name 已可见（第 $i 次查询）"
+                exit 0
+              fi
+            fi
+            sleep 2
+          done
+          if [ "$ok" -eq 0 ]; then
+            echo "无法访问产物服务，等待 15 秒后继续"
+            sleep 15
+            exit 0
+          fi
+          echo "等待产物 $name 超时"
+          exit 1
 
       - uses: actions/deploy-pages@v4
         with:
