@@ -73,9 +73,9 @@ jobs:
           # 每次尝试用不同产物名：重跑（attempt>=2）时，旧的同名产物不会导致部署失败
           name: github-pages-${{ github.run_attempt }}
 
-      # GitHub 的产物元数据接口有延迟：deploy-pages 通过 Actions 产物服务（Twirp）查询，
-      # 刚上传完立刻查询可能返回 0 个产物，导致部署失败。这里先轮询 REST 接口，
-      # 再轮询 deploy-pages 实际使用的产物服务，等产物真正可见后再部署。
+      # GitHub 的产物元数据接口有延迟：deploy-pages 查询产物时偶尔返回 0 个
+      # （2026-11-23、11-24、11-25 的部署失败均为此原因）。先等 REST 接口可见，
+      # 再留出同步时间；若部署仍失败，等待后重试一次。
       - name: 等待 Pages 产物可查询
         env:
           GH_TOKEN: ${{ github.token }}
@@ -84,32 +84,24 @@ jobs:
           for i in $(seq 1 45); do
             n=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?name=$name" --jq '.artifacts | length' 2>/dev/null || echo 0)
             if [ "$n" -gt 0 ]; then
-              echo "REST: 产物 $name 已可见（第 $i 次查询）"
+              echo "产物 $name 已可见（第 $i 次查询）"
               break
             fi
             sleep 2
           done
-          ok=0
-          for i in $(seq 1 30); do
-            body=$(curl -sS --max-time 5 -X POST "$ACTIONS_RESULTS_URL/twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts" -H "Authorization: Bearer $ACTIONS_RUNTIME_TOKEN" -H 'Content-Type: application/json' -d '{}' 2>/dev/null || true)
-            if [ -n "$body" ]; then
-              ok=1
-              n=$(printf '%s' "$body" | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(1 for a in d.get('artifacts',[]) if a.get('name')==sys.argv[1]))" "$name" 2>/dev/null || echo 0)
-              if [ "${n:-0}" -gt 0 ]; then
-                echo "产物服务: $name 已可见（第 $i 次查询）"
-                exit 0
-              fi
-            fi
-            sleep 2
-          done
-          if [ "$ok" -eq 0 ]; then
-            echo "无法访问产物服务，等待 15 秒后继续"
-            sleep 15
-            exit 0
-          fi
-          echo "等待产物 $name 超时"
-          exit 1
+          sleep 20
 
       - uses: actions/deploy-pages@v4
+        id: pages-deploy-1
+        continue-on-error: true
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
+
+      - name: 部署失败时等待产物服务同步
+        if: steps.pages-deploy-1.outcome == 'failure'
+        run: sleep 60
+
+      - uses: actions/deploy-pages@v4
+        if: steps.pages-deploy-1.outcome == 'failure'
         with:
           artifact_name: github-pages-${{ github.run_attempt }}
