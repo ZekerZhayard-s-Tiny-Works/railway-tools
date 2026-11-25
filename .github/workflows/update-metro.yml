@@ -14,6 +14,7 @@ permissions:
   contents: write
   pages: write
   id-token: write
+  actions: read
 
 concurrency:
   group: update-metro
@@ -104,6 +105,23 @@ jobs:
           path: ${{ runner.temp }}/site
           # 每次尝试用不同产物名：重跑（attempt>=2）时，旧的同名产物不会导致部署失败
           name: github-pages-${{ github.run_attempt }}
+
+      # GitHub 的产物元数据接口有延迟：刚上传完立刻查询可能返回 0 个产物，deploy-pages 会因此失败。
+      # 这里轮询等待产物可见（最多约 90 秒）。
+      - name: 等待 Pages 产物可查询
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name="github-pages-${{ github.run_attempt }}"
+          for i in $(seq 1 45); do
+            n=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?name=$name" --jq '.artifacts | length' 2>/dev/null || echo 0)
+            if [ "$n" -gt 0 ]; then
+              echo "产物 $name 已可见（第 $i 次查询）"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "等待产物 $name 超时"; exit 1
 
       - uses: actions/deploy-pages@v4
         with:
